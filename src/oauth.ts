@@ -28,7 +28,7 @@ export type KiroLoginMethod = "auto" | "builder-id" | "google" | "github";
 export interface KiroCredentials extends OAuthCredentials {
   clientId: string;
   clientSecret: string;
-  region: string;
+  region?: string;
   authMethod: KiroAuthMethod;
   /** Required for Google/GitHub social profiles; ListAvailableProfiles may return empty for these tokens. */
   profileArn?: string;

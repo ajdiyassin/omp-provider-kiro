@@ -145,7 +145,8 @@ function tryKiroCliToken(
   let expiresAt = Date.now() + 3600000;
   if (tokenData.expires_at) expiresAt = new Date(tokenData.expires_at).getTime();
   if (!allowExpired && Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
-  const region = tokenData.region || "us-east-1";
+  const profileArn = tokenData.profile_arn || tokenData.profileArn;
+  const region = tokenData.region || undefined;
 
   if (authMethod === "desktop") {
     return {
@@ -156,7 +157,7 @@ function tryKiroCliToken(
       clientSecret: "",
       region,
       authMethod: "desktop",
-      profileArn: tokenData.profile_arn || tokenData.profileArn,
+      profileArn,
     };
   }
 
@@ -184,6 +185,7 @@ function tryKiroCliToken(
     clientSecret,
     region,
     authMethod: "idc",
+    profileArn,
   };
 }
 

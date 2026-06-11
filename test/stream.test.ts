@@ -134,6 +134,11 @@ describe("Feature 9: Streaming Integration", () => {
 
   it("resolves profileArn via ListAvailableProfiles and includes it in request body", async () => {
     resetProfileArnCache(false);
+    const kiroCliMod = await import("../src/kiro-cli.js");
+    const getCredsSpy = vi.spyOn(kiroCliMod, "getKiroCliCredentials").mockReturnValue(undefined);
+    const getExpiredSpy = vi.spyOn(kiroCliMod, "getKiroCliCredentialsAllowExpired").mockReturnValue(undefined);
+    const authMetaMod = await import("../src/auth-meta.js");
+    const readMetaSpy = vi.spyOn(authMetaMod, "readAuthMeta").mockReturnValue(undefined);
     const testArn = "arn:aws:codewhisperer:us-east-1:123:profile/TEST";
     const mockFetch = vi
       .fn()
@@ -178,6 +183,9 @@ describe("Feature 9: Streaming Integration", () => {
     const body2 = JSON.parse(mockFetch2.mock.calls[0][1].body);
     expect(body2.profileArn).toBe(testArn);
 
+    getCredsSpy.mockRestore();
+    getExpiredSpy.mockRestore();
+    readMetaSpy.mockRestore();
     vi.unstubAllGlobals();
   });
 
@@ -1681,6 +1689,47 @@ describe("Feature 9: Streaming Integration", () => {
 
     const kiroCall = mockFetch.mock.calls.find(([url]) => typeof url === "string" && url.includes("generateAssistantResponse"));
     expect(kiroCall?.[0]).toContain("q.us-east-1.amazonaws.com");
+
+    getCredsSpy.mockRestore();
+    getExpiredSpy.mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("auto-probes EU region when US returns 403 for ListAvailableProfiles", async () => {
+    resetProfileArnCache(false);
+    const kiroCliModule = await import("../src/kiro-cli.js");
+    const getCredsSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentials").mockReturnValue(undefined);
+    const getExpiredSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentialsAllowExpired").mockReturnValue(undefined);
+
+    const mockFetch = vi.fn(async (url: string) => {
+      // US ListAvailableProfiles → fail (403)
+      if (typeof url === "string" && url.includes("q.us-east-1") && !url.includes("generateAssistant")) {
+        return { ok: false, status: 403, statusText: "Forbidden", text: () => Promise.resolve("denied") };
+      }
+      // EU ListAvailableProfiles → success
+      if (typeof url === "string" && url.includes("q.eu-central-1") && !url.includes("generateAssistant")) {
+        return { ok: true, json: () => Promise.resolve({ profiles: [{ arn: "arn:aws:codewhisperer:eu-central-1:123:profile/test" }] }) };
+      }
+      // generateAssistantResponse → success
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: vi.fn()
+              .mockResolvedValueOnce({ done: false, value: new TextEncoder().encode('{"content":"ok"}{"contextUsagePercentage":5}') })
+              .mockResolvedValueOnce({ done: true, value: undefined }),
+          }),
+        },
+      };
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const model = { ...makeModel(), baseUrl: undefined };
+    const stream = streamKiro(model as any, makeContext(), { apiKey: "tok" });
+    await collect(stream);
+
+    const kiroCall = mockFetch.mock.calls.find(([u]) => typeof u === "string" && u.includes("generateAssistantResponse"));
+    expect(kiroCall?.[0]).toContain("q.eu-central-1.amazonaws.com");
 
     getCredsSpy.mockRestore();
     getExpiredSpy.mockRestore();

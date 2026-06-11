@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { endpointForApiRegion, extractRegionFromEndpoint, filterModelsByRegion, KIRO_MODEL_IDS, kiroModels, resolveApiRegion, resolveKiroModel } from "../src/models.js";
+import { endpointForApiRegion, extractRegionFromEndpoint, extractRegionFromProfileArn, filterModelsByRegion, KIRO_MODEL_IDS, kiroModels, resolveApiRegion, resolveKiroModel } from "../src/models.js";
 
 describe("Feature 2: Model Definitions", () => {
   describe("resolveKiroModel", () => {
@@ -180,6 +180,18 @@ describe("Feature 2: Model Definitions", () => {
     it("returns undefined for invalid input", () => {
       expect(extractRegionFromEndpoint(undefined)).toBeUndefined();
       expect(extractRegionFromEndpoint("not-a-url")).toBeUndefined();
+    });
+  });
+
+  describe("extractRegionFromProfileArn", () => {
+    it("extracts region from valid profile ARN", () => {
+      expect(extractRegionFromProfileArn("arn:aws:codewhisperer:eu-central-1:123:profile/abc")).toBe("eu-central-1");
+      expect(extractRegionFromProfileArn("arn:aws:codewhisperer:us-east-1:456:profile/def")).toBe("us-east-1");
+    });
+    it("returns undefined for invalid input", () => {
+      expect(extractRegionFromProfileArn(undefined)).toBeUndefined();
+      expect(extractRegionFromProfileArn("not-an-arn")).toBeUndefined();
+      expect(extractRegionFromProfileArn("")).toBeUndefined();
     });
   });
 });

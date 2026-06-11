@@ -16,14 +16,15 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import { clearAuthMeta, readAuthMeta, writeAuthMeta } from "./auth-meta.js";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog } from "./debug.js";
 import { parseKiroEvents } from "./event-parser.js";
 import { createAssistantMessageEventStream } from "./event-stream.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
-import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired } from "./kiro-cli.js";
+import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, saveKiroCliCredentials } from "./kiro-cli.js";
 import { forceRefreshKiroToken, type KiroCredentials } from "./oauth.js";
-import { endpointForApiRegion, extractRegionFromEndpoint, resolveApiRegion, resolveKiroModel } from "./models.js";
+import { endpointForApiRegion, extractRegionFromEndpoint, extractRegionFromProfileArn, resolveApiRegion, resolveKiroModel } from "./models.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
@@ -191,6 +192,19 @@ function emitToolCall(
   return true;
 }
 
+const KIRO_API_PROBE_REGIONS = ["us-east-1", "eu-central-1"];
+
+async function autoDetectKiroApiRegion(
+  accessToken: string,
+): Promise<{ apiRegion: string; endpoint: string; profileArn?: string } | undefined> {
+  for (const apiRegion of KIRO_API_PROBE_REGIONS) {
+    const endpoint = endpointForApiRegion(apiRegion);
+    const arn = await resolveProfileArn(accessToken, endpoint);
+    if (arn) return { apiRegion, endpoint, profileArn: arn };
+  }
+  return undefined;
+}
+
 export function streamKiro(
   model: Model<Api>,
   context: Context,
@@ -228,20 +242,52 @@ export function streamKiro(
           : expiredCliCreds?.access === accessToken ? expiredCliCreds
             : undefined;
 
+      const cachedMeta = readAuthMeta(accessToken);
+
       const requestedRegion =
         process.env.KIRO_API_REGION ||
         optionCreds?.region ||
+        extractRegionFromProfileArn(optionCreds?.profileArn) ||
+        cachedMeta?.apiRegion ||
+        extractRegionFromProfileArn(cachedMeta?.profileArn) ||
         matchingCliCreds?.region ||
+        extractRegionFromProfileArn(matchingCliCreds?.profileArn) ||
         cliCreds?.region ||
+        extractRegionFromProfileArn(cliCreds?.profileArn) ||
         expiredCliCreds?.region ||
-        extractRegionFromEndpoint(model.baseUrl);
+        extractRegionFromProfileArn(expiredCliCreds?.profileArn);
 
-      const apiRegion = resolveApiRegion(requestedRegion);
-      let endpoint = endpointForApiRegion(apiRegion);
+      let apiRegion: string;
+      let endpoint: string;
+      let profileArn: string | undefined =
+        optionCreds?.profileArn ||
+        matchingCliCreds?.profileArn ||
+        cachedMeta?.profileArn;
 
-      const optionProfileArn = optionCreds?.profileArn || (options as unknown as { profileArn?: string })?.profileArn;
-      const cliProfileArn = matchingCliCreds?.profileArn;
-      let profileArn = optionProfileArn || cliProfileArn || (await resolveProfileArn(accessToken, endpoint));
+      if (requestedRegion) {
+        apiRegion = resolveApiRegion(requestedRegion);
+        endpoint = endpointForApiRegion(apiRegion);
+        profileArn = profileArn || (await resolveProfileArn(accessToken, endpoint));
+      } else {
+        const detected = await autoDetectKiroApiRegion(accessToken);
+        if (detected) {
+          apiRegion = detected.apiRegion;
+          endpoint = detected.endpoint;
+          profileArn = detected.profileArn;
+        } else {
+          apiRegion = resolveApiRegion(extractRegionFromEndpoint(model.baseUrl));
+          endpoint = endpointForApiRegion(apiRegion);
+          profileArn = await resolveProfileArn(accessToken, endpoint);
+        }
+      }
+
+      if (profileArn) {
+        const profileRegion = extractRegionFromProfileArn(profileArn);
+        writeAuthMeta(accessToken, { apiRegion: profileRegion || apiRegion, profileArn, updatedAt: Date.now() });
+        if (matchingCliCreds && !matchingCliCreds.region) {
+          saveKiroCliCredentials({ ...matchingCliCreds, region: profileRegion || apiRegion, profileArn });
+        }
+      }
 
       // Trigger dynamic models cache update in the background if empty or stale
       const { isCacheStale, updateKiroModelsCache } = await import("./models.js");
@@ -255,8 +301,10 @@ export function streamKiro(
         endpoint,
         apiRegion,
         credentialRegion: optionCreds?.region,
+        cachedRegion: cachedMeta?.apiRegion,
         cliRegion: matchingCliCreds?.region || cliCreds?.region || expiredCliCreds?.region,
         envRegion: process.env.KIRO_API_REGION,
+        autoDetected: !requestedRegion,
         model: model.id,
         kiroModelId,
         contextWindow: model.contextWindow,
@@ -479,10 +527,26 @@ export function streamKiro(
             if (response.status === 403 && !isCapacityError(errText) && retryCount < maxRetries) {
               retryCount++;
 
-              const optionCreds = (options as unknown as { credentials?: KiroCredentials })?.credentials;
-              const cliCreds = getKiroCliCredentials();
-              const expiredCliCreds = getKiroCliCredentialsAllowExpired();
-              const candidates = [optionCreds, cliCreds, expiredCliCreds].filter(
+              // First 403: try alternate region (wrong region is the most common cause)
+              if (retryCount === 1 && !process.env.KIRO_API_REGION) {
+                clearAuthMeta(accessToken);
+                const detected = await autoDetectKiroApiRegion(accessToken);
+                if (detected && detected.apiRegion !== apiRegion) {
+                  apiRegion = detected.apiRegion;
+                  endpoint = detected.endpoint;
+                  profileArn = detected.profileArn;
+                  writeAuthMeta(accessToken, { apiRegion, profileArn, updatedAt: Date.now() });
+                  const delayMs = exponentialBackoff(retryCount - 1, 500, MAX_RETRY_DELAY);
+                  await abortableDelay(delayMs, options?.signal);
+                  break;
+                }
+              }
+
+              // Otherwise: try token refresh
+              const optCreds = (options as unknown as { credentials?: KiroCredentials })?.credentials;
+              const cli = getKiroCliCredentials();
+              const expiredCli = getKiroCliCredentialsAllowExpired();
+              const candidates = [optCreds, cli, expiredCli].filter(
                 (c): c is KiroCredentials => !!c?.refresh && !!c?.access,
               );
 
@@ -499,7 +563,7 @@ export function streamKiro(
               if (freshCreds?.access) {
                 accessToken = freshCreds.access;
                 const refreshedApiRegion = resolveApiRegion(
-                  process.env.KIRO_API_REGION || freshCreds.region || apiRegion,
+                  freshCreds.region || extractRegionFromProfileArn(freshCreds.profileArn) || apiRegion,
                 );
                 endpoint = endpointForApiRegion(refreshedApiRegion);
               }

@@ -42,7 +42,7 @@ function readKiroIdeToken(allowExpired: boolean): KiroCredentials | undefined {
     const expiresAt = new Date(tokenData.expiresAt).getTime();
     if (!allowExpired && Date.now() >= expiresAt - 2 * 60 * 1000) return undefined;
 
-    const region = tokenData.region ?? "us-east-1";
+    const region = tokenData.region || undefined;
 
     // Load the OIDC client registration so refreshKiroTokenDirect can call the
     // AWS OIDC /token endpoint with a refresh_token grant without prompting the user.

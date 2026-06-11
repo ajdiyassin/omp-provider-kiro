@@ -218,6 +218,12 @@ export function extractRegionFromEndpoint(endpoint: string | undefined): string 
   return undefined;
 }
 
+export function extractRegionFromProfileArn(profileArn: string | undefined): string | undefined {
+  if (!profileArn) return undefined;
+  const parts = profileArn.split(":");
+  return parts[0] === "arn" && parts.length > 3 && parts[3] ? parts[3] : undefined;
+}
+
 /**
  * Model availability per API region (allowlist).
  * Source: https://kiro.dev/docs/cli/models/
