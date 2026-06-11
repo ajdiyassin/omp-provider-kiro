@@ -1,28 +1,28 @@
 {
-  "name": "pi-provider-kiro",
-  "version": "0.8.0",
-  "description": "pi extension for the Kiro API (AWS CodeWhisperer/Q) — 12 kiro-cli-verified models with OAuth authentication",
+  "name": "omp-provider-kiro",
+  "version": "0.1.0",
+  "description": "OMP-native provider extension for Kiro API",
   "type": "module",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mikeyobrien/pi-provider-kiro.git"
+    "url": "git+https://github.com/ajdiyassin/omp-provider-kiro.git"
   },
   "keywords": [
-    "pi-package",
-    "pi",
+    "omp",
+    "oh-my-pi",
     "kiro",
     "aws",
     "codewhisperer",
-    "ai",
-    "provider"
+    "provider",
+    "extension"
   ],
   "files": [
     "dist",
     "README.md"
   ],
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@earendil-works/pi-ai --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-tui",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --packages=bundle",
     "check": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
@@ -30,7 +30,12 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepare": "npm run build",
-    "prepublishOnly": "npm run check && npm run build"
+    "prepublishOnly": "npm run check && npm run test && npm run build"
+  },
+  "omp": {
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "pi": {
     "extensions": [
@@ -38,14 +43,13 @@
     ]
   },
   "dependencies": {
-    "esbuild": "^0.25.0",
     "js-tiktoken": "^1.0.21"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.2",
-    "@earendil-works/pi-ai": "^0.75.5",
-    "@earendil-works/pi-coding-agent": "^0.75.5",
-    "@earendil-works/pi-tui": "^0.75.5",
+    "@oh-my-pi/pi-ai": "15.11.0",
+    "@oh-my-pi/pi-coding-agent": "15.11.0",
+    "esbuild": "^0.25.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }

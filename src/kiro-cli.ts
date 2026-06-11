@@ -12,10 +12,15 @@ const require = createRequire(import.meta.url);
 
 export function getKiroCliDbPath(): string | undefined {
   const p = platform();
+  if (p === "win32") {
+    const candidates = [
+      join(process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local"), "Kiro-Cli", "data.sqlite3"),
+      join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "kiro-cli", "data.sqlite3"),
+    ];
+    return candidates.find((c) => existsSync(c));
+  }
   let dbPath: string;
-  if (p === "win32")
-    dbPath = join(process.env.APPDATA || join(homedir(), "AppData", "Roaming"), "kiro-cli", "data.sqlite3");
-  else if (p === "darwin") dbPath = join(homedir(), "Library", "Application Support", "kiro-cli", "data.sqlite3");
+  if (p === "darwin") dbPath = join(homedir(), "Library", "Application Support", "kiro-cli", "data.sqlite3");
   else dbPath = join(homedir(), ".local", "share", "kiro-cli", "data.sqlite3");
   return existsSync(dbPath) ? dbPath : undefined;
 }

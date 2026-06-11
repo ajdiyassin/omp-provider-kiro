@@ -7,7 +7,7 @@ import type {
   Model,
   TextContent,
   ToolResultMessage,
-} from "@earendil-works/pi-ai";
+} from "@oh-my-pi/pi-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";

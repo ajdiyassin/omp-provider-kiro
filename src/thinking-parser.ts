@@ -6,7 +6,7 @@ import type {
   AssistantMessageEventStream,
   TextContent,
   ThinkingContent,
-} from "@earendil-works/pi-ai";
+} from "@oh-my-pi/pi-ai";
 
 export const THINKING_START_TAG = "<thinking>";
 export const THINKING_END_TAG = "</thinking>";

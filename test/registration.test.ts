@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { kiroModels } from "../src/models.js";
 
@@ -38,7 +38,7 @@ describe("Feature 1: Extension Registration", () => {
     mod.default(pi);
 
     const config = registerProvider.mock.calls[0][1];
-    expect(config.oauth.name).toBe("Kiro (Builder ID / Google / GitHub)");
+    expect(config.oauth.name).toBe("Kiro");
     expect(typeof config.oauth.login).toBe("function");
     expect(typeof config.oauth.refreshToken).toBe("function");
     expect(typeof config.oauth.getApiKey).toBe("function");

@@ -7,7 +7,7 @@
 // When no existing credentials are found (no Kiro IDE, no kiro-cli), falls back
 // to the interactive login flow in login.ts (Feature 10).
 
-import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai";
 import { getKiroIdeCredentials, getKiroIdeCredentialsAllowExpired } from "./kiro-ide.js";
 import { interactiveLogin, loginViaKiroCli } from "./login.js";
 
@@ -242,7 +242,7 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
       region,
       authMethod: "desktop" as KiroAuthMethod,
       profileArn: data.profileArn || (credentials as KiroCredentials).profileArn,
-    };
+    } as unknown as OAuthCredentials;
   }
 
   // IDC auth method — SSO OIDC refresh
@@ -264,5 +264,5 @@ async function refreshKiroTokenDirect(credentials: OAuthCredentials): Promise<OA
     clientSecret: clientSecret,
     region,
     authMethod: "idc" as KiroAuthMethod,
-  };
+  } as unknown as OAuthCredentials;
 }

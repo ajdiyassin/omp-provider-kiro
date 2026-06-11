@@ -15,11 +15,11 @@ import type {
   TextContent,
   ToolCall,
   ToolResultMessage,
-} from "@earendil-works/pi-ai";
-import * as PiAi from "@earendil-works/pi-ai";
+} from "@oh-my-pi/pi-ai";
 import { parseBracketToolCalls } from "./bracket-tool-parser.js";
 import { debugEnabled, debugLog } from "./debug.js";
 import { parseKiroEvents } from "./event-parser.js";
+import { createAssistantMessageEventStream } from "./event-stream.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, refreshViaKiroCli } from "./kiro-cli.js";
 import { resolveKiroModel } from "./models.js";
@@ -195,13 +195,7 @@ export function streamKiro(
   context: Context,
   options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-  // pi-ai's barrel re-exports the class as type-only before the runtime class re-export, so
-  // a named import of AssistantMessageEventStream resolves to a type. Read it from the
-  // namespace import to get the actual constructor. Replaces the removed
-  // createAssistantMessageEventStream() factory (gone in @oh-my-pi/pi-ai).
-  const StreamCtor = (PiAi as unknown as { AssistantMessageEventStream: new () => AssistantMessageEventStream })
-    .AssistantMessageEventStream;
-  const stream = new StreamCtor();
+  const stream = createAssistantMessageEventStream();
   (async () => {
     const output: AssistantMessage = {
       role: "assistant",
@@ -221,7 +215,7 @@ export function streamKiro(
       timestamp: Date.now(),
     };
     try {
-      let accessToken = options?.apiKey;
+      let accessToken = options?.apiKey as string | undefined;
       if (!accessToken) throw new Error("Kiro credentials not set. Run /login kiro or install kiro-cli.");
       const endpoint = model.baseUrl || "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
 
@@ -255,7 +249,7 @@ export function streamKiro(
         profileArn,
         sessionId: options?.sessionId,
       });
-      let systemPrompt = context.systemPrompt ?? "";
+      let systemPrompt = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n") : (context.systemPrompt ?? "");
       if (thinkingEnabled) {
         const budget =
           options?.reasoning === "xhigh"
@@ -711,12 +705,8 @@ export function streamKiro(
         if (usageEvent?.inputTokens !== undefined) output.usage.input = usageEvent.inputTokens;
         output.usage.output = usageEvent?.outputTokens ?? countTokens(totalContent);
         output.usage.totalTokens = output.usage.input + output.usage.output;
-        try {
-          PiAi.calculateCost(model, output.usage);
-        } catch {
-          // Model might not have cost info, use zeros
-          output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-        }
+        // All Kiro models are zero cost
+        output.usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
         // Detect degenerate responses: the API returned 200 but produced no
         // usable content at all — no text and no tool calls (not even broken
         // ones). This happens when the stream is truncated early or the API
