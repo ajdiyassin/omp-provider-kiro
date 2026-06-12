@@ -11,7 +11,9 @@ export default function ompKiroProvider(pi: ExtensionAPI) {
   pi.registerProvider("kiro", {
     baseUrl: endpointForApiRegion("us-east-1"),
     api: "kiro-api",
-    models: kiroModels,
+    // `thinking.efforts` uses pi-catalog's `Effort` const-enum nominally; our
+    // values are the matching strings, so cast at the boundary.
+    models: kiroModels as unknown as Parameters<ExtensionAPI["registerProvider"]>[1]["models"],
     oauth: {
       name: "Kiro",
       login: loginKiro,

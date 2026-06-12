@@ -39,6 +39,27 @@ describe("Build output validation", () => {
     expect(content).not.toContain("refreshViaKiroCli");
   });
 
+  it("has no legacy extended-thinking XML injection", () => {
+    const content = readFileSync(distPath, "utf-8");
+    expect(content).not.toContain("thinking_mode");
+    expect(content).not.toContain("max_thinking_length");
+  });
+
+  it("has no legacy q.<region>.amazonaws.com chat/model endpoint", () => {
+    const content = readFileSync(distPath, "utf-8");
+    // The legacy chat path and the q. host are gone; auth oidc.<region>.amazonaws.com is allowed.
+    expect(content).not.toContain("/generateAssistantResponse");
+    expect(content).not.toMatch(/q\.\$\{[^}]+\}\.amazonaws\.com/);
+    expect(content).not.toContain("q.us-east-1.amazonaws.com");
+  });
+
+  it("uses the current kiro.dev endpoints", () => {
+    const content = readFileSync(distPath, "utf-8");
+    expect(content).toContain("kiro.dev");
+    expect(content).toContain("runtime.");
+    expect(content).toContain("management.");
+  });
+
   it("only imports Node built-ins", () => {
     const content = readFileSync(distPath, "utf-8");
     const importLines = content.match(/^import .+ from ["'][^"']+["']/gm) || [];

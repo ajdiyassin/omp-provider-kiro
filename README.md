@@ -1,6 +1,6 @@
 # omp-provider-kiro
 
-OMP-native provider extension for the [Kiro](https://kiro.dev) API — 13 models including Claude Opus/Sonnet/Haiku, DeepSeek, MiniMax, GLM, and Qwen via AWS CodeWhisperer/Q.
+OMP-native provider extension for the [Kiro](https://kiro.dev) API — Claude Opus/Sonnet/Haiku (with official adaptive thinking on Opus 4.8/4.7/4.6 and Sonnet 4.6), plus DeepSeek, MiniMax, GLM, and Qwen.
 
 Fork of [mikeyobrien/pi-provider-kiro](https://github.com/mikeyobrien/pi-provider-kiro), converted to a self-contained OMP extension with no runtime dependency on `@earendil-works/*` or OMP TUI internals.
 
@@ -67,6 +67,41 @@ Prompt: `Paste IAM Identity Center URL, or blank for Builder ID`
 ```
 
 Available models: `claude-opus-4-8`, `claude-opus-4-7`, `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-sonnet-4-5`, `claude-sonnet-4`, `claude-haiku-4-5`, `deepseek-3-2`, `minimax-m2-5`, `minimax-m2-1`, `glm-5`, `qwen3-coder-next`, `auto`
+
+## Adaptive thinking
+
+Reasoning for the supported Claude models uses Kiro's official **adaptive-thinking** fields,
+sent in the request's top-level `additionalModelRequestFields`:
+
+- `thinking.type = adaptive`, `thinking.display = summarized`
+- `output_config.effort` = reasoning depth (`low | medium | high | xhigh | max`)
+- `max_tokens` = total output cap (thinking + text + tool calls), **not** a thinking budget
+
+OMP thinking levels (set via the `kiro/<model>:<level>` selector or model roles) are mapped to
+Kiro effort per model:
+
+| OMP level | Opus 4.8 / 4.7 | Opus 4.6 / Sonnet 4.6 |
+|-----------|----------------|------------------------|
+| minimal   | low            | low                    |
+| low       | medium         | low                    |
+| medium    | high           | medium                 |
+| high      | xhigh          | high                   |
+| xhigh     | max            | max                    |
+
+Adaptive thinking is supported only on **Opus 4.8, Opus 4.7, Opus 4.6, and Sonnet 4.6**
+(`max_tokens` caps: 128000 for Opus 4.8/4.7, 64000 for Opus 4.6 / Sonnet 4.6). All other
+models work as plain Kiro models and receive no adaptive fields. Set `KIRO_ADAPTIVE_THINKING=0`
+to disable adaptive fields for debugging.
+
+## API endpoints
+
+This extension targets the current Kiro API (matching Kiro CLI 2.6.x):
+
+- Chat (streaming): `https://runtime.{region}.kiro.dev/` — `GenerateAssistantResponse`
+- Models / profile: `https://management.{region}.kiro.dev/` — `ListAvailableModels`, `GetProfile`, `ListAvailableProfiles`
+
+`{region}` is `us-east-1` or `eu-central-1` (auto-detected from your credentials). The legacy
+`q.{region}.amazonaws.com` CodeWhisperer endpoint is no longer used.
 
 ## Windows Kiro CLI DB paths
 

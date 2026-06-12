@@ -29,7 +29,7 @@ function makeModel(overrides?: Partial<Model<Api>>): Model<Api> {
     name: "Sonnet",
     api: "kiro-api",
     provider: "kiro",
-    baseUrl: "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+    baseUrl: "https://runtime.us-east-1.kiro.dev/",
     reasoning: true,
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -109,6 +109,7 @@ describe("Feature 9: Streaming Integration", () => {
   });
 
   it("makes POST to correct endpoint with auth header", async () => {
+    resetProfileArnCache(true); // skip profile resolution for this unit test
     const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":10}');
     vi.stubGlobal("fetch", mockFetch);
 
@@ -117,7 +118,8 @@ describe("Feature 9: Streaming Integration", () => {
 
     expect(mockFetch).toHaveBeenCalledOnce();
     const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toContain("generateAssistantResponse");
+    expect(url).toContain("runtime.");
+    expect(url).toContain("kiro.dev");
     expect(opts.headers.Authorization).toBe("Bearer test-token");
 
     const done = events.find((e) => e.type === "done");
@@ -130,6 +132,104 @@ describe("Feature 9: Streaming Integration", () => {
     expect(msg?.usage.totalTokens).toBeGreaterThan(20000);
 
     vi.unstubAllGlobals();
+  });
+
+  describe("adaptive thinking in request body", () => {
+    function bodyOf(mockFetch: ReturnType<typeof vi.fn>) {
+      return JSON.parse(mockFetch.mock.calls[0][1].body);
+    }
+
+    it("opus-4-8 with reasoning xhigh sends top-level additionalModelRequestFields (effort max, 128000)", async () => {
+      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+      vi.stubGlobal("fetch", mockFetch);
+      const stream = streamKiro(makeModel({ id: "claude-opus-4-8", reasoning: true }), makeContext(), {
+        apiKey: "tok",
+        reasoning: "xhigh",
+      } as any);
+      await collect(stream);
+      const body = bodyOf(mockFetch);
+      expect(body.additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "max" },
+        max_tokens: 128000,
+      });
+      vi.unstubAllGlobals();
+    });
+
+    it("sonnet-4-6 with reasoning high sends effort high, 64000", async () => {
+      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+      vi.stubGlobal("fetch", mockFetch);
+      const stream = streamKiro(makeModel({ id: "claude-sonnet-4-6", reasoning: true }), makeContext(), {
+        apiKey: "tok",
+        reasoning: "high",
+      } as any);
+      await collect(stream);
+      const body = bodyOf(mockFetch);
+      expect(body.additionalModelRequestFields.output_config.effort).toBe("high");
+      expect(body.additionalModelRequestFields.max_tokens).toBe(64000);
+      vi.unstubAllGlobals();
+    });
+
+    it("non-adaptive model (haiku) sends no additionalModelRequestFields", async () => {
+      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+      vi.stubGlobal("fetch", mockFetch);
+      const stream = streamKiro(makeModel({ id: "claude-haiku-4-5", reasoning: false }), makeContext(), {
+        apiKey: "tok",
+        reasoning: "high",
+      } as any);
+      await collect(stream);
+      expect(bodyOf(mockFetch).additionalModelRequestFields).toBeUndefined();
+      vi.unstubAllGlobals();
+    });
+
+    it("auto sends no additionalModelRequestFields", async () => {
+      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+      vi.stubGlobal("fetch", mockFetch);
+      const stream = streamKiro(makeModel({ id: "auto", reasoning: true }), makeContext(), {
+        apiKey: "tok",
+        reasoning: "xhigh",
+      } as any);
+      await collect(stream);
+      expect(bodyOf(mockFetch).additionalModelRequestFields).toBeUndefined();
+      vi.unstubAllGlobals();
+    });
+
+    it("request body mirrors kiro-cli: envState, agentContinuationId, no agentMode, no legacy thinking XML", async () => {
+      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+      vi.stubGlobal("fetch", mockFetch);
+      const stream = streamKiro(makeModel({ id: "claude-opus-4-8", reasoning: true }), makeContext(), {
+        apiKey: "tok",
+        reasoning: "high",
+      } as any);
+      await collect(stream);
+      const body = bodyOf(mockFetch);
+      const uim = body.conversationState.currentMessage.userInputMessage;
+      expect(uim.userInputMessageContext.envState).toEqual({
+        operatingSystem: process.platform === "darwin" ? "macos" : process.platform,
+        currentWorkingDirectory: process.cwd(),
+      });
+      expect(body.conversationState.agentContinuationId).toBeDefined();
+      expect(body.conversationState.agentTaskType).toBe("vibe");
+      expect(body.agentMode).toBeUndefined();
+      const raw = mockFetch.mock.calls[0][1].body as string;
+      expect(raw).not.toContain("thinking_mode");
+      expect(raw).not.toContain("max_thinking_length");
+      vi.unstubAllGlobals();
+    });
+
+    it("KIRO_ADAPTIVE_THINKING=0 disables additionalModelRequestFields", async () => {
+      process.env.KIRO_ADAPTIVE_THINKING = "0";
+      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
+      vi.stubGlobal("fetch", mockFetch);
+      const stream = streamKiro(makeModel({ id: "claude-opus-4-8", reasoning: true }), makeContext(), {
+        apiKey: "tok",
+        reasoning: "xhigh",
+      } as any);
+      await collect(stream);
+      expect(bodyOf(mockFetch).additionalModelRequestFields).toBeUndefined();
+      delete process.env.KIRO_ADAPTIVE_THINKING;
+      vi.unstubAllGlobals();
+    });
   });
 
   it("resolves profileArn via ListAvailableProfiles and includes it in request body", async () => {
@@ -1624,8 +1724,8 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
     await collect(stream);
 
-    const kiroCall = mockFetch.mock.calls.find(([url]) => typeof url === "string" && url.includes("generateAssistantResponse"));
-    expect(kiroCall?.[0]).toContain("q.eu-central-1.amazonaws.com");
+    const kiroCall = mockFetch.mock.calls.find(([url]) => typeof url === "string" && url.includes("kiro.dev"));
+    expect(kiroCall?.[0]).toContain("runtime.eu-central-1.kiro.dev");
 
     delete process.env.KIRO_API_REGION;
     vi.unstubAllGlobals();
@@ -1655,8 +1755,8 @@ describe("Feature 9: Streaming Integration", () => {
     } as any);
     await collect(stream);
 
-    const kiroCall = mockFetch.mock.calls.find(([url]) => typeof url === "string" && url.includes("generateAssistantResponse"));
-    expect(kiroCall?.[0]).toContain("q.eu-central-1.amazonaws.com");
+    const kiroCall = mockFetch.mock.calls.find(([url]) => typeof url === "string" && url.includes("kiro.dev"));
+    expect(kiroCall?.[0]).toContain("runtime.eu-central-1.kiro.dev");
 
     vi.unstubAllGlobals();
   });
@@ -1683,12 +1783,12 @@ describe("Feature 9: Streaming Integration", () => {
     });
     vi.stubGlobal("fetch", mockFetch);
 
-    const model = { ...makeModel(), baseUrl: "https://q.us-east-1.amazonaws.com/generateAssistantResponse" };
+    const model = { ...makeModel(), baseUrl: "https://runtime.us-east-1.kiro.dev/" };
     const stream = streamKiro(model, makeContext(), { apiKey: "tok" });
     await collect(stream);
 
-    const kiroCall = mockFetch.mock.calls.find(([url]) => typeof url === "string" && url.includes("generateAssistantResponse"));
-    expect(kiroCall?.[0]).toContain("q.us-east-1.amazonaws.com");
+    const kiroCall = mockFetch.mock.calls.find(([url]) => typeof url === "string" && url.includes("kiro.dev"));
+    expect(kiroCall?.[0]).toContain("runtime.us-east-1.kiro.dev");
 
     getCredsSpy.mockRestore();
     getExpiredSpy.mockRestore();
@@ -1702,12 +1802,12 @@ describe("Feature 9: Streaming Integration", () => {
     const getExpiredSpy = vi.spyOn(kiroCliModule, "getKiroCliCredentialsAllowExpired").mockReturnValue(undefined);
 
     const mockFetch = vi.fn(async (url: string) => {
-      // US ListAvailableProfiles → fail (403)
-      if (typeof url === "string" && url.includes("q.us-east-1") && !url.includes("generateAssistant")) {
+      // US management ListAvailableProfiles → fail (403)
+      if (typeof url === "string" && url.includes("management.us-east-1") ) {
         return { ok: false, status: 403, statusText: "Forbidden", text: () => Promise.resolve("denied") };
       }
-      // EU ListAvailableProfiles → success
-      if (typeof url === "string" && url.includes("q.eu-central-1") && !url.includes("generateAssistant")) {
+      // EU management ListAvailableProfiles → success
+      if (typeof url === "string" && url.includes("management.eu-central-1")) {
         return { ok: true, json: () => Promise.resolve({ profiles: [{ arn: "arn:aws:codewhisperer:eu-central-1:123:profile/test" }] }) };
       }
       // generateAssistantResponse → success
@@ -1728,8 +1828,8 @@ describe("Feature 9: Streaming Integration", () => {
     const stream = streamKiro(model as any, makeContext(), { apiKey: "tok" });
     await collect(stream);
 
-    const kiroCall = mockFetch.mock.calls.find(([u]) => typeof u === "string" && u.includes("generateAssistantResponse"));
-    expect(kiroCall?.[0]).toContain("q.eu-central-1.amazonaws.com");
+    const kiroCall = mockFetch.mock.calls.find(([u]) => typeof u === "string" && u.includes("runtime."));
+    expect(kiroCall?.[0]).toContain("runtime.eu-central-1.kiro.dev");
 
     getCredsSpy.mockRestore();
     getExpiredSpy.mockRestore();

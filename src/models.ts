@@ -77,25 +77,27 @@ export function isCacheStale(region: string): boolean {
 
 export async function updateKiroModelsCache(accessToken: string, region: string, profileArn?: string): Promise<void> {
   try {
-    const qHost = `https://q.${region}.amazonaws.com`;
-    const url = new URL(`${qHost}/ListAvailableModels`);
-    url.searchParams.set("origin", "AI_EDITOR");
-    if (profileArn) {
-      url.searchParams.set("profileArn", profileArn);
-    }
+    const mgmt = managementEndpointForApiRegion(region);
+    const body: Record<string, string> = {};
+    if (profileArn) body.profileArn = profileArn;
 
-    const response = await fetch(url.toString(), {
-      method: "GET",
+    const response = await fetch(mgmt, {
+      method: "POST",
       headers: {
+        "Content-Type": "application/x-amz-json-1.0",
         Authorization: `Bearer ${accessToken}`,
+        "X-Amz-Target": "AmazonCodeWhispererService.ListAvailableModels",
       },
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
       return;
     }
 
-    const data = (await response.json()) as { models?: Array<{ modelId: string }> };
+    const data = (await response.json()) as {
+      models?: Array<{ modelId: string; additionalModelRequestFieldsSchema?: unknown; tokenLimits?: { maxInputTokens?: number; maxOutputTokens?: number } }>
+    };
     const fetchedModels = data.models || [];
     if (fetchedModels.length === 0) return;
 
@@ -109,8 +111,10 @@ export async function updateKiroModelsCache(accessToken: string, region: string,
       }
 
       const isClaude = piId.startsWith("claude");
-      const isReasoning =
-        piId.includes("opus") || piId.includes("sonnet") || piId.includes("coder") || piId.includes("deepseek");
+      // Only mark reasoning if the server says so via additionalModelRequestFieldsSchema
+      const isReasoning = !!fm.additionalModelRequestFieldsSchema;
+      const maxOut = fm.tokenLimits?.maxOutputTokens ?? (isClaude ? 65536 : 8192);
+      const maxIn = fm.tokenLimits?.maxInputTokens ?? (isClaude ? 1000000 : 200000);
       const name = piId
         .split("-")
         .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
@@ -121,12 +125,12 @@ export async function updateKiroModelsCache(accessToken: string, region: string,
         name: name,
         api: "kiro-api" as const,
         provider: "kiro" as const,
-        baseUrl: `${qHost}/generateAssistantResponse`,
+        baseUrl: endpointForApiRegion(region),
         reasoning: isReasoning,
         input: isClaude ? (["text", "image"] as ("text" | "image")[]) : (["text"] as ("text" | "image")[]),
         cost: ZERO_COST,
-        contextWindow: isClaude ? 1000000 : 200000,
-        maxTokens: isClaude ? 65536 : 8192,
+        contextWindow: maxIn,
+        maxTokens: maxOut,
       };
     });
 
@@ -136,7 +140,7 @@ export async function updateKiroModelsCache(accessToken: string, region: string,
         name: "Auto",
         api: "kiro-api" as const,
         provider: "kiro" as const,
-        baseUrl: `${qHost}/generateAssistantResponse`,
+        baseUrl: endpointForApiRegion(region),
         reasoning: true,
         input: ["text", "image"],
         cost: ZERO_COST,
@@ -206,13 +210,21 @@ export function resolveApiRegion(ssoRegion: string | undefined): string {
 }
 
 export function endpointForApiRegion(apiRegion: string): string {
-  return `https://q.${apiRegion}.amazonaws.com/generateAssistantResponse`;
+  return `https://runtime.${apiRegion}.kiro.dev/`;
+}
+
+export function managementEndpointForApiRegion(apiRegion: string): string {
+  return `https://management.${apiRegion}.kiro.dev/`;
 }
 
 export function extractRegionFromEndpoint(endpoint: string | undefined): string | undefined {
   if (!endpoint) return undefined;
   try {
-    const parts = new URL(endpoint).hostname.split(".");
+    const hostname = new URL(endpoint).hostname;
+    const parts = hostname.split(".");
+    // runtime.{region}.kiro.dev or management.{region}.kiro.dev
+    if ((parts[0] === "runtime" || parts[0] === "management") && parts[1]) return parts[1];
+    // legacy q.{region}.amazonaws.com — keep resolving for cached auth-meta values
     if (parts[0] === "q" && parts[1]) return parts[1];
   } catch {}
   return undefined;
@@ -277,7 +289,7 @@ export function filterModelsByRegion<T extends { id: string }>(models: T[], apiR
   return models.filter((m) => allowed.has(m.id));
 }
 
-const BASE_URL = "https://q.us-east-1.amazonaws.com/generateAssistantResponse";
+const BASE_URL = "https://runtime.us-east-1.kiro.dev/";
 const ZERO_COST = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 
 export const kiroModels = [
@@ -288,7 +300,13 @@ export const kiroModels = [
     provider: "kiro" as const,
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
+    thinking: {
+      mode: "anthropic-adaptive" as const,
+      efforts: ["minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultLevel: "medium" as const,
+      effortMap: { minimal: "low", low: "medium", medium: "high", high: "xhigh", xhigh: "max" },
+      supportsDisplay: true,
+    },
     input: ["text", "image"] as ("text" | "image")[],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -302,7 +320,13 @@ export const kiroModels = [
     provider: "kiro" as const,
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
+    thinking: {
+      mode: "anthropic-adaptive" as const,
+      efforts: ["minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultLevel: "high" as const,
+      effortMap: { minimal: "low", low: "medium", medium: "high", high: "xhigh", xhigh: "max" },
+      supportsDisplay: true,
+    },
     input: ["text", "image"] as ("text" | "image")[],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -317,7 +341,13 @@ export const kiroModels = [
     provider: "kiro" as const,
     baseUrl: BASE_URL,
     reasoning: true,
-    thinkingLevelMap: { xhigh: "xhigh" },
+    thinking: {
+      mode: "anthropic-adaptive" as const,
+      efforts: ["minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultLevel: "high" as const,
+      effortMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max" },
+      supportsDisplay: true,
+    },
     input: ["text", "image"] as ("text" | "image")[],
     cost: ZERO_COST,
     contextWindow: 1000000,
@@ -331,6 +361,13 @@ export const kiroModels = [
     provider: "kiro" as const,
     baseUrl: BASE_URL,
     reasoning: true,
+    thinking: {
+      mode: "anthropic-adaptive" as const,
+      efforts: ["minimal", "low", "medium", "high", "xhigh"] as const,
+      defaultLevel: "high" as const,
+      effortMap: { minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "max" },
+      supportsDisplay: true,
+    },
     input: ["text", "image"] as ("text" | "image")[],
     cost: ZERO_COST,
     contextWindow: 1000000,

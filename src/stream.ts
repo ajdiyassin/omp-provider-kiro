@@ -24,7 +24,8 @@ import { createAssistantMessageEventStream } from "./event-stream.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, saveKiroCliCredentials } from "./kiro-cli.js";
 import { forceRefreshKiroToken, type KiroCredentials } from "./oauth.js";
-import { endpointForApiRegion, extractRegionFromEndpoint, extractRegionFromProfileArn, resolveApiRegion, resolveKiroModel } from "./models.js";
+import { endpointForApiRegion, extractRegionFromEndpoint, extractRegionFromProfileArn, managementEndpointForApiRegion, resolveApiRegion, resolveKiroModel } from "./models.js";
+import { buildKiroAdaptiveThinkingPayload, type KiroAdaptivePayload, type OmpEffort } from "./adaptive-thinking.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
@@ -42,6 +43,7 @@ import {
   convertToolsToKiro,
   extractImages,
   getContentText,
+  getEnvState,
   type KiroHistoryEntry,
   type KiroImage,
   type KiroToolResult,
@@ -94,12 +96,13 @@ interface KiroRequest {
   conversationState: {
     chatTriggerType: "MANUAL";
     agentTaskType: "vibe";
+    agentContinuationId?: string;
     conversationId: string;
     currentMessage: { userInputMessage: KiroUserInputMessage };
     history?: KiroHistoryEntry[];
   };
   profileArn?: string;
-  agentMode?: string;
+  additionalModelRequestFields?: KiroAdaptivePayload;
 }
 interface KiroToolCallState {
   toolUseId: string;
@@ -123,12 +126,11 @@ async function resolveProfileArn(accessToken: string, endpoint: string): Promise
   if (profileArnCache.has(endpoint)) return profileArnCache.get(endpoint);
   if (profileArnPending.has(endpoint)) return undefined;
   try {
-    const ep = new URL(endpoint);
-    ep.pathname = ep.pathname.replace(/\/generateAssistantResponse\/?$/, "/");
-    ep.search = "";
-    ep.hash = "";
+    // Derive management host from runtime endpoint: runtime.{region}.kiro.dev -> management.{region}.kiro.dev
+    const region = extractRegionFromEndpoint(endpoint) ?? "us-east-1";
+    const mgmtEndpoint = managementEndpointForApiRegion(region);
 
-    const r = await fetch(ep.toString(), {
+    const r = await fetch(mgmtEndpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-amz-json-1.0",
@@ -296,7 +298,7 @@ export function streamKiro(
       }
 
       const kiroModelId = resolveKiroModel(model.id);
-      const thinkingEnabled = !!options?.reasoning || model.reasoning;
+      const adaptiveThinking = buildKiroAdaptiveThinkingPayload(model.id, options?.reasoning as OmpEffort | undefined);
       debugLog("request.init", {
         endpoint,
         apiRegion,
@@ -308,7 +310,9 @@ export function streamKiro(
         model: model.id,
         kiroModelId,
         contextWindow: model.contextWindow,
-        thinkingEnabled,
+        adaptiveThinkingEnabled: Boolean(adaptiveThinking),
+        kiroEffort: adaptiveThinking?.output_config.effort,
+        maxTokens: adaptiveThinking?.max_tokens,
         reasoning: options?.reasoning,
         messageCount: context.messages.length,
         toolCount: context.tools?.length ?? 0,
@@ -316,21 +320,13 @@ export function streamKiro(
         profileArn,
         sessionId: options?.sessionId,
       });
-      let systemPrompt = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n") : (context.systemPrompt ?? "");
-      if (thinkingEnabled) {
-        const budget =
-          options?.reasoning === "xhigh"
-            ? 50000
-            : options?.reasoning === "high"
-              ? 30000
-              : options?.reasoning === "medium"
-                ? 20000
-                : 10000;
-        systemPrompt = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>${systemPrompt ? `\n${systemPrompt}` : ""}`;
-      }
+      // System prompt is sent plain — adaptive thinking is controlled via
+      // additionalModelRequestFields, not legacy extended-thinking XML.
+      const systemPrompt = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n") : (context.systemPrompt ?? "");
       let retryCount = 0;
       const maxRetries = 3;
       const conversationId = options?.sessionId ?? crypto.randomUUID();
+      const agentContinuationId = crypto.randomUUID();
       while (retryCount <= maxRetries) {
         if (options?.signal?.aborted) throw options.signal.reason;
         const effectiveSystemPrompt = systemPrompt;
@@ -453,6 +449,7 @@ export function streamKiro(
           conversationState: {
             chatTriggerType: "MANUAL",
             agentTaskType: "vibe",
+            agentContinuationId,
             conversationId,
             currentMessage: {
               userInputMessage: {
@@ -460,13 +457,13 @@ export function streamKiro(
                 modelId: kiroModelId,
                 origin: "KIRO_CLI",
                 ...(currentImages ? { images: currentImages } : {}),
-                ...(uimc ? { userInputMessageContext: uimc } : {}),
+                userInputMessageContext: { ...(uimc ?? {}), envState: getEnvState() },
               },
             },
             ...(history.length > 0 ? { history } : {}),
           },
           ...(profileArn ? { profileArn } : {}),
-          agentMode: "vibe",
+          ...(adaptiveThinking ? { additionalModelRequestFields: adaptiveThinking } : {}),
         };
         let response!: Response;
         // Reset per outer iteration — each 403 retry gets a fresh capacity budget
@@ -474,7 +471,7 @@ export function streamKiro(
         // Inner loop: retry capacity errors without consuming outer retry budget
         while (true) {
           const mid = crypto.randomUUID().replace(/-/g, "");
-          const ua = `aws-sdk-rust/1.0.0 ua/2.1 os/other lang/rust api/codewhispererstreaming#1.28.3 m/E app/AmazonQ-For-CLI md/appVersion-1.28.3-${mid}`;
+          const ua = `aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.16551 os/windows lang/rust/1.92.0 exec-env/AmazonQ-For-CLI Version/2.6.1 md/appVersion-2.6.1-${mid} app/AmazonQ-For-CLI`;
           debugLog("request.send", {
             attempt: retryCount,
             capacityAttempt: capacityRetryCount,
@@ -488,13 +485,12 @@ export function streamKiro(
             method: "POST",
             headers: {
               "Content-Type": "application/x-amz-json-1.0",
-              Accept: "application/json",
+              Accept: "application/vnd.amazon.eventstream",
               Authorization: `Bearer ${accessToken}`,
               "X-Amz-Target": "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-              "x-amzn-codewhisperer-optout": "true",
+              "x-amzn-codewhisperer-optout": "false",
               "amz-sdk-invocation-id": crypto.randomUUID(),
-              "amz-sdk-request": "attempt=1; max=1",
-              "x-amzn-kiro-agent-mode": "vibe",
+              "amz-sdk-request": "attempt=1; max=3",
               "x-amz-user-agent": ua,
               "user-agent": ua,
             },
@@ -603,7 +599,7 @@ export function streamKiro(
         let lastContentData = "";
         let usageEvent: { inputTokens?: number; outputTokens?: number } | null = null;
         let receivedContextUsage = false;
-        const thinkingParser = thinkingEnabled ? new ThinkingTagParser(output, stream) : null;
+        const thinkingParser = model.reasoning ? new ThinkingTagParser(output, stream) : null;
         let textBlockIndex: number | null = null;
         let emittedToolCalls = 0;
         let sawAnyToolCalls = false;

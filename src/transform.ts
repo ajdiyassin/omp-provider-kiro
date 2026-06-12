@@ -28,12 +28,25 @@ export interface KiroToolResult {
 export interface KiroToolSpec {
   toolSpecification: { name: string; description: string; inputSchema: { json: Record<string, unknown> } };
 }
+export interface KiroEnvState {
+  operatingSystem: string;
+  currentWorkingDirectory: string;
+}
 export interface KiroUserInputMessage {
   content: string;
   modelId: string;
   origin: "KIRO_CLI";
   images?: KiroImage[];
-  userInputMessageContext?: { toolResults?: KiroToolResult[]; tools?: KiroToolSpec[] };
+  userInputMessageContext?: { toolResults?: KiroToolResult[]; tools?: KiroToolSpec[]; envState?: KiroEnvState };
+}
+
+/** Build the envState block kiro-cli sends on every userInputMessage. */
+export function getEnvState(): KiroEnvState {
+  const platform = process.platform;
+  return {
+    operatingSystem: platform === "darwin" ? "macos" : platform,
+    currentWorkingDirectory: process.cwd(),
+  };
 }
 export interface KiroAssistantResponseMessage {
   content: string;
@@ -134,6 +147,7 @@ export function buildHistory(
         modelId,
         origin: "KIRO_CLI",
         ...(images.length > 0 ? { images: convertImagesToKiro(images) } : {}),
+        userInputMessageContext: { envState: getEnvState() },
       };
       const lastEntryForUim = history[history.length - 1];
       const prevUim = lastEntryForUim?.userInputMessage;
@@ -209,7 +223,7 @@ export function buildHistory(
             modelId,
             origin: "KIRO_CLI",
             ...(trImages.length > 0 ? { images: convertImagesToKiro(trImages) } : {}),
-            userInputMessageContext: { toolResults },
+            userInputMessageContext: { toolResults, envState: getEnvState() },
           },
         });
       }

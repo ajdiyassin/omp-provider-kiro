@@ -115,65 +115,63 @@ describe("Feature 2: Model Definitions", () => {
     });
   });
 
-  // pi's UI exposes the `xhigh` thinking level only when a model's
-  // `thinkingLevelMap.xhigh` is explicitly defined (not undefined, not null).
-  // All other levels are opt-out. Mirror the pi-ai filter locally so this test
-  // is self-contained and version-independent from @oh-my-pi/pi-ai.
-  //
-  // Source: @oh-my-pi/pi-ai models.ts → getSupportedThinkingLevels
-  describe("thinkingLevelMap — pi UI exposes xhigh", () => {
-    const EXTENDED_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-    type Level = (typeof EXTENDED_LEVELS)[number];
+  // The four adaptive models carry `thinking: ThinkingConfig` (anthropic-adaptive).
+  // All other models must NOT carry adaptive thinking metadata.
+  describe("adaptive thinking metadata", () => {
+    const ADAPTIVE = ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-4-6"];
 
-    function supportedLevels(model: (typeof kiroModels)[number]): Level[] {
-      if (!model.reasoning) return ["off"];
-      return EXTENDED_LEVELS.filter((level) => {
-        const mapped = (model as { thinkingLevelMap?: Partial<Record<Level, string | null>> }).thinkingLevelMap?.[
-          level
-        ];
-        if (mapped === null) return false;
-        if (level === "xhigh") return mapped !== undefined;
-        return true;
-      });
-    }
-
-    const XHIGH_MODELS = ["claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6"];
-
-    it("Opus 4.7/4.6 models offer xhigh (and all other levels)", () => {
-      for (const m of kiroModels.filter((x) => XHIGH_MODELS.includes(x.id))) {
-        expect(supportedLevels(m), `${m.id} supported levels`).toEqual([
-          "off",
-          "minimal",
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-        ]);
+    it("the four adaptive models have anthropic-adaptive thinking metadata", () => {
+      for (const m of kiroModels.filter((x) => ADAPTIVE.includes(x.id))) {
+        const t = (m as { thinking?: { mode?: string; efforts?: readonly string[]; effortMap?: Record<string, string>; supportsDisplay?: boolean } }).thinking;
+        expect(t, `${m.id} thinking`).toBeDefined();
+        expect(t?.mode).toBe("anthropic-adaptive");
+        expect(t?.supportsDisplay).toBe(true);
+        expect(t?.efforts).toEqual(["minimal", "low", "medium", "high", "xhigh"]);
+        expect(t?.effortMap?.xhigh).toBe("max");
       }
     });
 
-    it("other reasoning models offer up to high (no xhigh)", () => {
-      for (const m of kiroModels.filter((x) => x.reasoning && !XHIGH_MODELS.includes(x.id))) {
-        expect(supportedLevels(m), `${m.id} supported levels`).toEqual(["off", "minimal", "low", "medium", "high"]);
+    it("opus 4.8/4.7 use the 5-tier map (medium → high)", () => {
+      for (const id of ["claude-opus-4-8", "claude-opus-4-7"]) {
+        const m = kiroModels.find((x) => x.id === id) as { thinking?: { effortMap?: Record<string, string> } };
+        expect(m.thinking?.effortMap?.medium).toBe("high");
+        expect(m.thinking?.effortMap?.high).toBe("xhigh");
       }
     });
 
-    it("non-reasoning models still collapse to ['off']", () => {
-      for (const m of kiroModels.filter((x) => !x.reasoning)) {
-        expect(supportedLevels(m), `${m.id} supported levels`).toEqual(["off"]);
+    it("opus 4.6 / sonnet 4.6 use the 4-tier map (high → high)", () => {
+      for (const id of ["claude-opus-4-6", "claude-sonnet-4-6"]) {
+        const m = kiroModels.find((x) => x.id === id) as { thinking?: { effortMap?: Record<string, string> } };
+        expect(m.thinking?.effortMap?.high).toBe("high");
+        expect(m.thinking?.effortMap?.low).toBe("low");
+      }
+    });
+
+    it("non-adaptive models have no thinking metadata", () => {
+      for (const m of kiroModels.filter((x) => !ADAPTIVE.includes(x.id))) {
+        expect((m as { thinking?: unknown }).thinking, `${m.id} thinking`).toBeUndefined();
+      }
+    });
+
+    it("no model retains the dead thinkingLevelMap field", () => {
+      for (const m of kiroModels) {
+        expect((m as { thinkingLevelMap?: unknown }).thinkingLevelMap, `${m.id}`).toBeUndefined();
       }
     });
   });
 
   describe("endpointForApiRegion", () => {
     it("constructs correct endpoint", () => {
-      expect(endpointForApiRegion("eu-central-1")).toBe("https://q.eu-central-1.amazonaws.com/generateAssistantResponse");
-      expect(endpointForApiRegion("us-east-1")).toBe("https://q.us-east-1.amazonaws.com/generateAssistantResponse");
+      expect(endpointForApiRegion("eu-central-1")).toBe("https://runtime.eu-central-1.kiro.dev/");
+      expect(endpointForApiRegion("us-east-1")).toBe("https://runtime.us-east-1.kiro.dev/");
     });
   });
 
   describe("extractRegionFromEndpoint", () => {
     it("extracts region from valid endpoint", () => {
+      expect(extractRegionFromEndpoint("https://runtime.us-east-1.kiro.dev/")).toBe("us-east-1");
+      expect(extractRegionFromEndpoint("https://runtime.eu-central-1.kiro.dev/")).toBe("eu-central-1");
+      // legacy q.amazonaws.com format still resolves (cached auth-meta)
       expect(extractRegionFromEndpoint("https://q.us-east-1.amazonaws.com/generateAssistantResponse")).toBe("us-east-1");
       expect(extractRegionFromEndpoint("https://q.eu-central-1.amazonaws.com/generateAssistantResponse")).toBe("eu-central-1");
     });

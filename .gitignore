@@ -7,3 +7,6 @@ dist/
 .agents/
 .ralph/
 *.tgz
+
+# Local mitmproxy capture artifacts (contain profile ARNs)
+kiro-capture/
