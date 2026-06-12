@@ -10,6 +10,7 @@ import type {
   ToolCall,
   ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import type { KiroAdaptivePayload } from "./adaptive-thinking.js";
 
 export interface KiroImage {
   format: string;
@@ -37,14 +38,27 @@ export interface KiroUserInputMessage {
   modelId: string;
   origin: "KIRO_CLI";
   images?: KiroImage[];
-  userInputMessageContext?: { toolResults?: KiroToolResult[]; tools?: KiroToolSpec[]; envState?: KiroEnvState };
+  userInputMessageContext?: {
+    toolResults?: KiroToolResult[];
+    tools?: KiroToolSpec[];
+    envState?: KiroEnvState;
+    // experiment: "user-input-context" adaptive payload shape
+    additionalModelRequestFields?: KiroAdaptivePayload;
+  };
+  // experiment: "user-input-message" adaptive payload shape
+  additionalModelRequestFields?: KiroAdaptivePayload;
 }
+
+/** Map Node's process.platform to the operatingSystem enum the Kiro runtime accepts. */
+const KIRO_OS: Record<string, string> = { darwin: "macos", win32: "windows", linux: "linux" };
 
 /** Build the envState block kiro-cli sends on every userInputMessage. */
 export function getEnvState(): KiroEnvState {
-  const platform = process.platform;
+  // The runtime validates operatingSystem against a fixed enum. Sending the raw
+  // process.platform value ("win32") is rejected with 400 REQUEST_BODY_INVALID;
+  // kiro-cli sends "windows" / "macos" / "linux".
   return {
-    operatingSystem: platform === "darwin" ? "macos" : platform,
+    operatingSystem: KIRO_OS[process.platform] ?? "linux",
     currentWorkingDirectory: process.cwd(),
   };
 }

@@ -1,6 +1,10 @@
-import { describe, expect, it, afterEach } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
+  ADAPTIVE_PAYLOAD_LOCATIONS,
   buildKiroAdaptiveThinkingPayload,
+  getAdaptiveFieldSet,
+  getAdaptivePayloadShape,
+  isAdaptiveThinkingEnabled,
   isAdaptiveThinkingSupported,
   mapOmpEffortToKiroEffort,
 } from "../src/adaptive-thinking.js";
@@ -8,6 +12,8 @@ import {
 describe("adaptive-thinking", () => {
   afterEach(() => {
     delete process.env.KIRO_ADAPTIVE_THINKING;
+    delete process.env.KIRO_ADAPTIVE_PAYLOAD_SHAPE;
+    delete process.env.KIRO_ADAPTIVE_FIELDS;
   });
 
   describe("isAdaptiveThinkingSupported", () => {
@@ -23,6 +29,53 @@ describe("adaptive-thinking", () => {
       expect(isAdaptiveThinkingSupported("claude-opus-4-5")).toBe(false);
       expect(isAdaptiveThinkingSupported("qwen3-coder-next")).toBe(false);
     });
+  });
+
+  describe("isAdaptiveThinkingEnabled — enabled by default", () => {
+    it("is enabled by default", () => {
+      expect(isAdaptiveThinkingEnabled()).toBe(true);
+    });
+    it("is disabled only for '0' or 'false'", () => {
+      process.env.KIRO_ADAPTIVE_THINKING = "0";
+      expect(isAdaptiveThinkingEnabled()).toBe(false);
+      process.env.KIRO_ADAPTIVE_THINKING = "false";
+      expect(isAdaptiveThinkingEnabled()).toBe(false);
+      process.env.KIRO_ADAPTIVE_THINKING = "1";
+      expect(isAdaptiveThinkingEnabled()).toBe(true);
+    });
+  });
+
+  describe("getAdaptivePayloadShape", () => {
+    it("defaults to top-level-wrapper", () => {
+      expect(getAdaptivePayloadShape()).toBe("top-level-wrapper");
+    });
+    it.each(["top-level-wrapper", "top-level-direct", "user-input-message", "user-input-context"] as const)(
+      "passes through valid shape %s",
+      (shape) => {
+        process.env.KIRO_ADAPTIVE_PAYLOAD_SHAPE = shape;
+        expect(getAdaptivePayloadShape()).toBe(shape);
+      },
+    );
+    it("falls back to default for unknown shape", () => {
+      process.env.KIRO_ADAPTIVE_PAYLOAD_SHAPE = "nonsense";
+      expect(getAdaptivePayloadShape()).toBe("top-level-wrapper");
+    });
+  });
+
+  describe("getAdaptiveFieldSet", () => {
+    it("defaults to full", () => {
+      expect(getAdaptiveFieldSet()).toBe("full");
+    });
+    it("returns effort-only only when explicitly set", () => {
+      process.env.KIRO_ADAPTIVE_FIELDS = "effort-only";
+      expect(getAdaptiveFieldSet()).toBe("effort-only");
+    });
+  });
+
+  it("ADAPTIVE_PAYLOAD_LOCATIONS covers all four shapes", () => {
+    expect(Object.keys(ADAPTIVE_PAYLOAD_LOCATIONS).sort()).toEqual(
+      ["top-level-direct", "top-level-wrapper", "user-input-context", "user-input-message"].sort(),
+    );
   });
 
   describe("mapOmpEffortToKiroEffort — opus-4.8 (5-tier)", () => {
@@ -79,55 +132,42 @@ describe("adaptive-thinking", () => {
   });
 
   describe("buildKiroAdaptiveThinkingPayload", () => {
-    it("opus-4.8 xhigh → max, 128000", () => {
+    it("returns the full payload by default (enabled, full field-set)", () => {
       expect(buildKiroAdaptiveThinkingPayload("claude-opus-4-8", "xhigh")).toEqual({
         thinking: { type: "adaptive", display: "summarized" },
         output_config: { effort: "max" },
         max_tokens: 128000,
       });
     });
-    it("opus-4.7 xhigh → max, 128000", () => {
-      expect(buildKiroAdaptiveThinkingPayload("claude-opus-4-7", "xhigh")).toEqual({
-        thinking: { type: "adaptive", display: "summarized" },
+
+    it("KIRO_ADAPTIVE_THINKING=0 disables it (returns undefined)", () => {
+      process.env.KIRO_ADAPTIVE_THINKING = "0";
+      expect(buildKiroAdaptiveThinkingPayload("claude-opus-4-8", "xhigh")).toBeUndefined();
+    });
+
+    it("effort-only field-set emits only output_config", () => {
+      process.env.KIRO_ADAPTIVE_FIELDS = "effort-only";
+      expect(buildKiroAdaptiveThinkingPayload("claude-opus-4-8", "xhigh")).toEqual({
         output_config: { effort: "max" },
-        max_tokens: 128000,
       });
     });
-    it("opus-4.6 xhigh → max, 64000", () => {
-      expect(buildKiroAdaptiveThinkingPayload("claude-opus-4-6", "xhigh")).toEqual({
-        thinking: { type: "adaptive", display: "summarized" },
-        output_config: { effort: "max" },
-        max_tokens: 64000,
-      });
-    });
-    it("sonnet-4.6 high → high, 64000", () => {
-      expect(buildKiroAdaptiveThinkingPayload("claude-sonnet-4-6", "high")).toEqual({
-        thinking: { type: "adaptive", display: "summarized" },
-        output_config: { effort: "high" },
-        max_tokens: 64000,
-      });
-    });
-    it("sonnet-4.6 xhigh → max, 64000", () => {
+
+    it("full field-set on sonnet-4.6 caps max_tokens at 64000", () => {
       expect(buildKiroAdaptiveThinkingPayload("claude-sonnet-4-6", "xhigh")).toEqual({
         thinking: { type: "adaptive", display: "summarized" },
         output_config: { effort: "max" },
         max_tokens: 64000,
       });
     });
-    it("uses model default effort when reasoning is undefined", () => {
-      // opus-4.8 default → medium OMP → high Kiro
-      const p = buildKiroAdaptiveThinkingPayload("claude-opus-4-8", undefined);
-      expect(p?.output_config.effort).toBe("high");
+
+    it("uses model default effort when reasoning is undefined (opus-4.8 → high)", () => {
+      expect(buildKiroAdaptiveThinkingPayload("claude-opus-4-8", undefined)?.output_config.effort).toBe("high");
     });
+
     it("returns undefined for non-adaptive models", () => {
       expect(buildKiroAdaptiveThinkingPayload("claude-haiku-4-5", "high")).toBeUndefined();
       expect(buildKiroAdaptiveThinkingPayload("auto", "xhigh")).toBeUndefined();
       expect(buildKiroAdaptiveThinkingPayload("qwen3-coder-next", "high")).toBeUndefined();
-    });
-    it("KIRO_ADAPTIVE_THINKING=0 omits thinking and output_config", () => {
-      process.env.KIRO_ADAPTIVE_THINKING = "0";
-      const p = buildKiroAdaptiveThinkingPayload("claude-opus-4-8", "xhigh");
-      expect(p).toBeUndefined();
     });
   });
 });

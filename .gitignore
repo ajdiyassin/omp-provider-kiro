@@ -10,3 +10,7 @@ dist/
 
 # Local mitmproxy capture artifacts (contain profile ARNs)
 kiro-capture/
+
+# Bundled probe artifacts + live-probe logs (contain profile ARNs / account ids)
+scripts/*.mjs
+logs/

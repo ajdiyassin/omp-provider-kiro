@@ -5,6 +5,7 @@ import {
   convertImagesToKiro,
   convertToolsToKiro,
   getContentText,
+  getEnvState,
   normalizeMessages,
   sanitizeSurrogates,
   TOOL_RESULT_LIMIT,
@@ -248,5 +249,23 @@ describe("Feature 5: Message Transformation", () => {
         if (curr.assistantResponseMessage) expect(next.userInputMessage).toBeDefined();
       }
     });
+  });
+});
+
+
+describe("getEnvState", () => {
+  it("emits a Kiro-valid operatingSystem (never the raw process.platform)", () => {
+    // Regression: sending "win32" gets the whole request rejected with 400
+    // REQUEST_BODY_INVALID. The runtime only accepts windows/macos/linux.
+    const env = getEnvState();
+    expect(["windows", "macos", "linux"]).toContain(env.operatingSystem);
+    expect(env.operatingSystem).not.toBe("win32");
+    expect(env.currentWorkingDirectory).toBe(process.cwd());
+  });
+
+  it("maps the current platform correctly", () => {
+    const expected: Record<string, string> = { darwin: "macos", win32: "windows", linux: "linux" };
+    const want = expected[process.platform] ?? "linux";
+    expect(getEnvState().operatingSystem).toBe(want);
   });
 });

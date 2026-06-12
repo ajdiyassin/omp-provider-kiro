@@ -8,7 +8,7 @@ import type {
   TextContent,
   ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
 import { resetProfileArnCache, streamKiro } from "../src/stream.js";
 import type { KiroHistoryEntry } from "../src/transform.js";
@@ -138,39 +138,58 @@ describe("Feature 9: Streaming Integration", () => {
     function bodyOf(mockFetch: ReturnType<typeof vi.fn>) {
       return JSON.parse(mockFetch.mock.calls[0][1].body);
     }
-
-    it("opus-4-8 with reasoning xhigh sends top-level additionalModelRequestFields (effort max, 128000)", async () => {
+    async function send(reasoning = "xhigh", id = "claude-opus-4-8") {
       const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
       vi.stubGlobal("fetch", mockFetch);
-      const stream = streamKiro(makeModel({ id: "claude-opus-4-8", reasoning: true }), makeContext(), {
+      const stream = streamKiro(makeModel({ id, reasoning: true }), makeContext(), {
         apiKey: "tok",
-        reasoning: "xhigh",
+        reasoning,
       } as any);
       await collect(stream);
-      const body = bodyOf(mockFetch);
+      return mockFetch;
+    }
+
+    afterEach(() => {
+      delete process.env.KIRO_ADAPTIVE_THINKING;
+      delete process.env.KIRO_ADAPTIVE_PAYLOAD_SHAPE;
+      delete process.env.KIRO_ADAPTIVE_FIELDS;
+      vi.unstubAllGlobals();
+    });
+
+    it("default (enabled, full field-set) sends the full payload at additionalModelRequestFields", async () => {
+      const body = bodyOf(await send("xhigh"));
       expect(body.additionalModelRequestFields).toEqual({
         thinking: { type: "adaptive", display: "summarized" },
         output_config: { effort: "max" },
         max_tokens: 128000,
       });
-      vi.unstubAllGlobals();
     });
 
-    it("sonnet-4-6 with reasoning high sends effort high, 64000", async () => {
-      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
-      vi.stubGlobal("fetch", mockFetch);
-      const stream = streamKiro(makeModel({ id: "claude-sonnet-4-6", reasoning: true }), makeContext(), {
-        apiKey: "tok",
-        reasoning: "high",
-      } as any);
-      await collect(stream);
-      const body = bodyOf(mockFetch);
-      expect(body.additionalModelRequestFields.output_config.effort).toBe("high");
-      expect(body.additionalModelRequestFields.max_tokens).toBe(64000);
-      vi.unstubAllGlobals();
+    it("KIRO_ADAPTIVE_THINKING=0 sends no adaptive fields anywhere", async () => {
+      process.env.KIRO_ADAPTIVE_THINKING = "0";
+      const body = bodyOf(await send());
+      expect(body.additionalModelRequestFields).toBeUndefined();
+      expect(body.output_config).toBeUndefined();
+      expect(body.thinking).toBeUndefined();
+      const uim = body.conversationState.currentMessage.userInputMessage;
+      expect(uim.additionalModelRequestFields).toBeUndefined();
+      expect(uim.userInputMessageContext.additionalModelRequestFields).toBeUndefined();
     });
 
-    it("non-adaptive model (haiku) sends no additionalModelRequestFields", async () => {
+    it("KIRO_ADAPTIVE_FIELDS=effort-only omits thinking and max_tokens", async () => {
+      process.env.KIRO_ADAPTIVE_FIELDS = "effort-only";
+      expect(bodyOf(await send("xhigh")).additionalModelRequestFields).toEqual({ output_config: { effort: "max" } });
+    });
+
+    it("sonnet-4-6 high (4-tier) maps to effort high with full payload", async () => {
+      expect(bodyOf(await send("high", "claude-sonnet-4-6")).additionalModelRequestFields).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        output_config: { effort: "high" },
+        max_tokens: 64000,
+      });
+    });
+
+    it("non-adaptive model (haiku) sends nothing", async () => {
       const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
       vi.stubGlobal("fetch", mockFetch);
       const stream = streamKiro(makeModel({ id: "claude-haiku-4-5", reasoning: false }), makeContext(), {
@@ -179,10 +198,9 @@ describe("Feature 9: Streaming Integration", () => {
       } as any);
       await collect(stream);
       expect(bodyOf(mockFetch).additionalModelRequestFields).toBeUndefined();
-      vi.unstubAllGlobals();
     });
 
-    it("auto sends no additionalModelRequestFields", async () => {
+    it("auto sends nothing", async () => {
       const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
       vi.stubGlobal("fetch", mockFetch);
       const stream = streamKiro(makeModel({ id: "auto", reasoning: true }), makeContext(), {
@@ -191,21 +209,54 @@ describe("Feature 9: Streaming Integration", () => {
       } as any);
       await collect(stream);
       expect(bodyOf(mockFetch).additionalModelRequestFields).toBeUndefined();
-      vi.unstubAllGlobals();
+    });
+
+    describe("payload shapes place the payload exactly where expected", () => {
+      const PAYLOAD = { output_config: { effort: "max" } };
+
+      it("top-level-wrapper → request.additionalModelRequestFields", async () => {
+        process.env.KIRO_ADAPTIVE_FIELDS = "effort-only";
+        process.env.KIRO_ADAPTIVE_PAYLOAD_SHAPE = "top-level-wrapper";
+        const body = bodyOf(await send("xhigh"));
+        expect(body.additionalModelRequestFields).toEqual(PAYLOAD);
+        expect(body.output_config).toBeUndefined();
+      });
+
+      it("top-level-direct → payload fields spread as request siblings", async () => {
+        process.env.KIRO_ADAPTIVE_FIELDS = "effort-only";
+        process.env.KIRO_ADAPTIVE_PAYLOAD_SHAPE = "top-level-direct";
+        const body = bodyOf(await send("xhigh"));
+        expect(body.output_config).toEqual({ effort: "max" });
+        expect(body.additionalModelRequestFields).toBeUndefined();
+      });
+
+      it("user-input-message → userInputMessage.additionalModelRequestFields", async () => {
+        process.env.KIRO_ADAPTIVE_FIELDS = "effort-only";
+        process.env.KIRO_ADAPTIVE_PAYLOAD_SHAPE = "user-input-message";
+        const body = bodyOf(await send("xhigh"));
+        const uim = body.conversationState.currentMessage.userInputMessage;
+        expect(uim.additionalModelRequestFields).toEqual(PAYLOAD);
+        expect(body.additionalModelRequestFields).toBeUndefined();
+      });
+
+      it("user-input-context → userInputMessageContext.additionalModelRequestFields", async () => {
+        process.env.KIRO_ADAPTIVE_FIELDS = "effort-only";
+        process.env.KIRO_ADAPTIVE_PAYLOAD_SHAPE = "user-input-context";
+        const body = bodyOf(await send("xhigh"));
+        const uimc = body.conversationState.currentMessage.userInputMessage.userInputMessageContext;
+        expect(uimc.additionalModelRequestFields).toEqual(PAYLOAD);
+        expect(body.additionalModelRequestFields).toBeUndefined();
+      });
     });
 
     it("request body mirrors kiro-cli: envState, agentContinuationId, no agentMode, no legacy thinking XML", async () => {
-      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
-      vi.stubGlobal("fetch", mockFetch);
-      const stream = streamKiro(makeModel({ id: "claude-opus-4-8", reasoning: true }), makeContext(), {
-        apiKey: "tok",
-        reasoning: "high",
-      } as any);
-      await collect(stream);
+      const mockFetch = await send("high");
       const body = bodyOf(mockFetch);
       const uim = body.conversationState.currentMessage.userInputMessage;
       expect(uim.userInputMessageContext.envState).toEqual({
-        operatingSystem: process.platform === "darwin" ? "macos" : process.platform,
+        operatingSystem: ({ darwin: "macos", win32: "windows", linux: "linux" } as Record<string, string>)[
+          process.platform
+        ] ?? "linux",
         currentWorkingDirectory: process.cwd(),
       });
       expect(body.conversationState.agentContinuationId).toBeDefined();
@@ -214,21 +265,6 @@ describe("Feature 9: Streaming Integration", () => {
       const raw = mockFetch.mock.calls[0][1].body as string;
       expect(raw).not.toContain("thinking_mode");
       expect(raw).not.toContain("max_thinking_length");
-      vi.unstubAllGlobals();
-    });
-
-    it("KIRO_ADAPTIVE_THINKING=0 disables additionalModelRequestFields", async () => {
-      process.env.KIRO_ADAPTIVE_THINKING = "0";
-      const mockFetch = mockFetchOk('{"content":"Hi"}{"contextUsagePercentage":5}');
-      vi.stubGlobal("fetch", mockFetch);
-      const stream = streamKiro(makeModel({ id: "claude-opus-4-8", reasoning: true }), makeContext(), {
-        apiKey: "tok",
-        reasoning: "xhigh",
-      } as any);
-      await collect(stream);
-      expect(bodyOf(mockFetch).additionalModelRequestFields).toBeUndefined();
-      delete process.env.KIRO_ADAPTIVE_THINKING;
-      vi.unstubAllGlobals();
     });
   });
 
@@ -298,6 +334,30 @@ describe("Feature 9: Streaming Integration", () => {
     const events = await collect(stream);
     const done = events.find((e) => e.type === "done");
     expect(done?.type === "done" && done.reason).toBe("toolUse");
+
+    vi.unstubAllGlobals();
+  });
+
+  it("400 REQUEST_BODY_INVALID surfaces as request_body_invalid, not context_length_exceeded", async () => {
+    const mockFetch = vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      text: () =>
+        Promise.resolve(
+          '{"__type":"com.amazon.kiro.runtimeservice#ValidationException","message":"Improperly formed request.","reason":"REQUEST_BODY_INVALID"}',
+        ),
+    });
+    vi.stubGlobal("fetch", mockFetch);
+
+    const stream = streamKiro(makeModel(), makeContext(), { apiKey: "tok" });
+    const events = await collect(stream);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    const error = events.find((e) => e.type === "error");
+    expect(error).toBeDefined();
+    const errorMessage = error?.type === "error" ? error.error.errorMessage : "";
+    expect(errorMessage).toContain("request_body_invalid");
+    expect(errorMessage).not.toContain("context_length_exceeded");
 
     vi.unstubAllGlobals();
   });

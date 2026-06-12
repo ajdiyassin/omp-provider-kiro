@@ -3,9 +3,8 @@
 
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai";
 import type { KiroCredentials } from "./oauth.js";
-import { extractRegionFromProfileArn } from "./models.js";
+import { extractRegionFromProfileArn, managementEndpointForApiRegion } from "./models.js";
 
-const USAGE_ENDPOINT = "https://q.{region}.amazonaws.com/";
 const MANAGE_USAGE_URL = "https://app.kiro.dev/account/usage";
 const JSON_HEADERS = {
   "Content-Type": "application/x-amz-json-1.0",
@@ -124,7 +123,9 @@ function getRegion(credentials: OAuthCredentials): string {
 }
 
 function getEndpoint(credentials: OAuthCredentials): string {
-  return USAGE_ENDPOINT.replace("{region}", getRegion(credentials));
+  // GetUsageLimits / ListAvailableProfiles live on the management host, same as
+  // the rest of AmazonCodeWhispererService.* operations.
+  return managementEndpointForApiRegion(getRegion(credentials));
 }
 
 function toIsoDate(value: EpochLike | undefined): string | undefined {

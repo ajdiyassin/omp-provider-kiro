@@ -7,6 +7,7 @@ import {
   FIRST_TOKEN_TIMEOUT,
   isCapacityError,
   isNonRetryableBodyError,
+  isRequestBodyInvalidError,
   isTooBigError,
   MAX_RETRY_DELAY,
   retryConfig,
@@ -80,8 +81,9 @@ describe("isTooBigError", () => {
     expect(isTooBigError(400, "Input is too long for model")).toBe(true);
   });
 
-  it("returns true for 400 with 'Improperly formed'", () => {
-    expect(isTooBigError(400, "Improperly formed request")).toBe(true);
+  it("does NOT treat 'Improperly formed' as too-big (it is a schema/validation error)", () => {
+    expect(isTooBigError(400, "Improperly formed request")).toBe(false);
+    expect(isTooBigError(400, "REQUEST_BODY_INVALID")).toBe(false);
   });
 
   it("returns false for 400 without matching pattern", () => {
@@ -91,6 +93,29 @@ describe("isTooBigError", () => {
   it("returns false for non-413/400 status codes", () => {
     expect(isTooBigError(429, "CONTENT_LENGTH_EXCEEDS_THRESHOLD")).toBe(false);
     expect(isTooBigError(500, "Input is too long")).toBe(false);
+  });
+});
+
+describe("isRequestBodyInvalidError", () => {
+  it("returns true for 400 REQUEST_BODY_INVALID / Improperly formed", () => {
+    expect(isRequestBodyInvalidError(400, "REQUEST_BODY_INVALID")).toBe(true);
+    expect(isRequestBodyInvalidError(400, "Improperly formed request")).toBe(true);
+    expect(
+      isRequestBodyInvalidError(
+        400,
+        '{"__type":"com.amazon.kiro.runtimeservice#ValidationException","reason":"REQUEST_BODY_INVALID"}',
+      ),
+    ).toBe(true);
+  });
+
+  it("does not fire for genuine context-overflow text", () => {
+    expect(isRequestBodyInvalidError(400, "CONTENT_LENGTH_EXCEEDS_THRESHOLD")).toBe(false);
+    expect(isRequestBodyInvalidError(400, "Input is too long")).toBe(false);
+  });
+
+  it("returns false for non-400 status codes", () => {
+    expect(isRequestBodyInvalidError(413, "REQUEST_BODY_INVALID")).toBe(false);
+    expect(isRequestBodyInvalidError(500, "Improperly formed request")).toBe(false);
   });
 });
 

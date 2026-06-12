@@ -90,8 +90,20 @@ Kiro effort per model:
 
 Adaptive thinking is supported only on **Opus 4.8, Opus 4.7, Opus 4.6, and Sonnet 4.6**
 (`max_tokens` caps: 128000 for Opus 4.8/4.7, 64000 for Opus 4.6 / Sonnet 4.6). All other
-models work as plain Kiro models and receive no adaptive fields. Set `KIRO_ADAPTIVE_THINKING=0`
-to disable adaptive fields for debugging.
+models work as plain Kiro models and receive no adaptive fields. It is enabled by default
+and sends the full payload at the request's top-level `additionalModelRequestFields`.
+
+Override env vars (kill-switch + debugging; every combination below is live-verified):
+
+| Variable | Default | Values |
+|----------|---------|--------|
+| `KIRO_ADAPTIVE_THINKING` | enabled | `0`/`false` disables all adaptive fields |
+| `KIRO_ADAPTIVE_FIELDS` | `full` | `full` = `thinking`+`output_config`+`max_tokens`; `effort-only` = just `output_config.effort` |
+| `KIRO_ADAPTIVE_PAYLOAD_SHAPE` | `top-level-wrapper` | `top-level-wrapper`, `top-level-direct`, `user-input-message`, `user-input-context` |
+
+> Note: the Kiro runtime validates `userInputMessageContext.envState.operatingSystem` against
+> `windows`/`macos`/`linux`. Sending the raw Node `process.platform` (e.g. `win32`) is rejected
+> with `400 REQUEST_BODY_INVALID`; the extension maps it to the correct value.
 
 ## API endpoints
 

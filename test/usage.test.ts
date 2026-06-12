@@ -57,6 +57,9 @@ describe("fetchKiroUsage", () => {
     const usage = await fetchKiroUsage(creds);
 
     expect(fetchMock).toHaveBeenCalledOnce();
+    // GetUsageLimits must target the management host, not the retired q.<region>.amazonaws.com.
+    expect(fetchMock.mock.calls[0][0]).toBe("https://management.us-east-1.kiro.dev/");
+    expect(String(fetchMock.mock.calls[0][0])).not.toContain("amazonaws.com");
     expect(usage.subscriptionTitle).toBe("KIRO FREE");
     expect(usage.daysUntilReset).toBe(6);
     expect(usage.overageStatus).toBe("DISABLED");

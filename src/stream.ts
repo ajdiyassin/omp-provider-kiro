@@ -25,13 +25,22 @@ import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, trunc
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, saveKiroCliCredentials } from "./kiro-cli.js";
 import { forceRefreshKiroToken, type KiroCredentials } from "./oauth.js";
 import { endpointForApiRegion, extractRegionFromEndpoint, extractRegionFromProfileArn, managementEndpointForApiRegion, resolveApiRegion, resolveKiroModel } from "./models.js";
-import { buildKiroAdaptiveThinkingPayload, type KiroAdaptivePayload, type OmpEffort } from "./adaptive-thinking.js";
+import {
+  ADAPTIVE_PAYLOAD_LOCATIONS,
+  type AdaptivePayloadShape,
+  buildKiroAdaptiveThinkingPayload,
+  getAdaptiveFieldSet,
+  getAdaptivePayloadShape,
+  type KiroAdaptivePayload,
+  type OmpEffort,
+} from "./adaptive-thinking.js";
 import {
   capacityRetryConfig,
   exponentialBackoff,
   firstTokenTimeoutForModel,
   isCapacityError,
   isNonRetryableBodyError,
+  isRequestBodyInvalidError,
   isTooBigError,
   MAX_RETRY_DELAY,
 } from "./retry.js";
@@ -102,7 +111,41 @@ interface KiroRequest {
     history?: KiroHistoryEntry[];
   };
   profileArn?: string;
+  // experiment: "top-level-wrapper" adaptive payload shape
   additionalModelRequestFields?: KiroAdaptivePayload;
+  // experiment: "top-level-direct" adaptive payload shape (payload fields spread as siblings)
+  thinking?: KiroAdaptivePayload["thinking"];
+  output_config?: KiroAdaptivePayload["output_config"];
+  max_tokens?: number;
+}
+
+/**
+ * Place the adaptive payload into the request at the configured location.
+ * Mutates `request` in place. Only called when adaptive thinking is enabled and
+ * a payload was built, so normal requests are completely unaffected.
+ */
+export function applyAdaptivePayloadShape(
+  request: KiroRequest,
+  payload: KiroAdaptivePayload,
+  shape: AdaptivePayloadShape,
+): void {
+  const uim = request.conversationState.currentMessage.userInputMessage;
+  switch (shape) {
+    case "top-level-wrapper":
+      request.additionalModelRequestFields = payload;
+      break;
+    case "top-level-direct":
+      if (payload.thinking) request.thinking = payload.thinking;
+      request.output_config = payload.output_config;
+      if (payload.max_tokens !== undefined) request.max_tokens = payload.max_tokens;
+      break;
+    case "user-input-message":
+      uim.additionalModelRequestFields = payload;
+      break;
+    case "user-input-context":
+      (uim.userInputMessageContext ??= {}).additionalModelRequestFields = payload;
+      break;
+  }
 }
 interface KiroToolCallState {
   toolUseId: string;
@@ -299,6 +342,8 @@ export function streamKiro(
 
       const kiroModelId = resolveKiroModel(model.id);
       const adaptiveThinking = buildKiroAdaptiveThinkingPayload(model.id, options?.reasoning as OmpEffort | undefined);
+      const adaptivePayloadShape = adaptiveThinking ? getAdaptivePayloadShape() : undefined;
+      const adaptiveFields = adaptiveThinking ? getAdaptiveFieldSet() : undefined;
       debugLog("request.init", {
         endpoint,
         apiRegion,
@@ -311,6 +356,9 @@ export function streamKiro(
         kiroModelId,
         contextWindow: model.contextWindow,
         adaptiveThinkingEnabled: Boolean(adaptiveThinking),
+        adaptivePayloadShape,
+        adaptivePayloadLocation: adaptivePayloadShape ? ADAPTIVE_PAYLOAD_LOCATIONS[adaptivePayloadShape] : undefined,
+        adaptiveFields,
         kiroEffort: adaptiveThinking?.output_config.effort,
         maxTokens: adaptiveThinking?.max_tokens,
         reasoning: options?.reasoning,
@@ -463,8 +511,10 @@ export function streamKiro(
             ...(history.length > 0 ? { history } : {}),
           },
           ...(profileArn ? { profileArn } : {}),
-          ...(adaptiveThinking ? { additionalModelRequestFields: adaptiveThinking } : {}),
         };
+        if (adaptiveThinking && adaptivePayloadShape) {
+          applyAdaptivePayloadShape(request, adaptiveThinking, adaptivePayloadShape);
+        }
         let response!: Response;
         // Reset per outer iteration — each 403 retry gets a fresh capacity budget
         let capacityRetryCount = 0;
@@ -580,6 +630,11 @@ export function streamKiro(
             // Format error so pi-ai's isContextOverflow() recognizes it
             if (isTooBigError(response.status, errText)) {
               throw new Error(`Kiro API error: context_length_exceeded (${response.status} ${errText})`);
+            }
+            // Schema/validation rejection (e.g. an unaccepted additionalModelRequestFields
+            // shape). Surface explicitly so it is never mistaken for context overflow.
+            if (isRequestBodyInvalidError(response.status, errText)) {
+              throw new Error(`Kiro API error: request_body_invalid (${response.status} ${errText})`);
             }
             throw new Error(`Kiro API error: ${response.status} ${response.statusText} ${errText}`);
           }

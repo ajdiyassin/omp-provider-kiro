@@ -49,7 +49,11 @@ describe("Build output validation", () => {
     const content = readFileSync(distPath, "utf-8");
     // The legacy chat path and the q. host are gone; auth oidc.<region>.amazonaws.com is allowed.
     expect(content).not.toContain("/generateAssistantResponse");
+    // template-literal form: q.${region}.amazonaws.com
     expect(content).not.toMatch(/q\.\$\{[^}]+\}\.amazonaws\.com/);
+    // literal-placeholder form: q.{region}.amazonaws.com (runtime .replace) — the form usage.ts used
+    expect(content).not.toContain("q.{region}.amazonaws.com");
+    expect(content).not.toMatch(/q\.[a-z0-9-]+\.amazonaws\.com/);
     expect(content).not.toContain("q.us-east-1.amazonaws.com");
   });
 

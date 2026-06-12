@@ -28,7 +28,11 @@ export function exponentialBackoff(attempt: number, baseMs: number, maxMs: numbe
 
 export const MAX_RETRY_DELAY = 10_000;
 
-export const TOO_BIG_PATTERNS = ["CONTENT_LENGTH_EXCEEDS_THRESHOLD", "Input is too long", "Improperly formed"];
+export const TOO_BIG_PATTERNS = ["CONTENT_LENGTH_EXCEEDS_THRESHOLD", "Input is too long"];
+// Schema/validation rejections from the Kiro runtime. "Improperly formed" used to
+// live in TOO_BIG_PATTERNS, which mislabeled request-schema errors as context overflow
+// and silently triggered compaction instead of surfacing the real validation failure.
+const REQUEST_BODY_INVALID_PATTERNS = ["REQUEST_BODY_INVALID", "Improperly formed"];
 const NON_RETRYABLE_BODY_PATTERNS = ["MONTHLY_REQUEST_COUNT"];
 const CAPACITY_PATTERN = "INSUFFICIENT_MODEL_CAPACITY";
 export const CAPACITY_MAX_RETRIES = 3;
@@ -43,6 +47,15 @@ export const capacityRetryConfig = {
 /** Check whether an HTTP error represents a "request too large" condition. */
 export function isTooBigError(status: number, errorText: string): boolean {
   return status === 413 || (status === 400 && TOO_BIG_PATTERNS.some((p) => errorText.includes(p)));
+}
+
+/**
+ * Check whether a 400 represents a request-schema/validation rejection
+ * (e.g. an unaccepted additionalModelRequestFields shape) rather than a size
+ * problem. Must be tested AFTER isTooBigError so genuine overflow still wins.
+ */
+export function isRequestBodyInvalidError(status: number, errorText: string): boolean {
+  return status === 400 && REQUEST_BODY_INVALID_PATTERNS.some((p) => errorText.includes(p));
 }
 
 /** Check whether the response body contains a Kiro-specific non-retryable marker. */
