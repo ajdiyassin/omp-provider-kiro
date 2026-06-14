@@ -9,6 +9,8 @@ import {
   stripHistoryImages,
   truncateHistory,
 } from "../src/history.js";
+import { buildHistory } from "../src/transform.js";
+import { createKiroToolUseIdNormalizer, KIRO_TOOL_USE_ID_PATTERN } from "../src/tool-id.js";
 import type { KiroHistoryEntry, KiroToolResult, KiroToolSpec, KiroToolUse } from "../src/transform.js";
 
 const userEntry = (content: string, toolResults?: KiroToolResult[]): KiroHistoryEntry => ({
@@ -307,5 +309,44 @@ describe("Feature 6: History Management", () => {
       const tools = [toolSpec("bash")];
       expect(addPlaceholderTools(tools, [userEntry("hi")])).toEqual(tools);
     });
+  });
+});
+
+
+describe("synthetic tool-call injection inherits normalized IDs", () => {
+  it("Test 9: an orphan foreign tool result and its synthetic call share the same normalized ID", () => {
+    const normalizer = createKiroToolUseIdNormalizer();
+    // Assistant calls a (valid) id; the result references a DIFFERENT, foreign id → orphan.
+    const messages = [
+      { role: "user", content: "go", timestamp: 0 },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "toolu_aaa", name: "find", arguments: {} }],
+        api: "kiro-api",
+        provider: "kiro",
+        model: "test",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse",
+        timestamp: 0,
+      },
+      { role: "toolResult", toolCallId: "functions.eval:17", toolName: "eval", content: [{ type: "text", text: "r" }], isError: false, timestamp: 0 },
+      { role: "user", content: "next", timestamp: 0 },
+    ] as never[];
+
+    const { history } = buildHistory(messages, "M", undefined, normalizer.normalize);
+    const truncated = truncateHistory(history, HISTORY_LIMIT);
+
+    const syntheticCall = truncated.find((e) =>
+      e.assistantResponseMessage?.toolUses?.some((t) => t.name === "unknown_tool"),
+    );
+    const callId = syntheticCall?.assistantResponseMessage?.toolUses?.[0].toolUseId;
+    const resultId = truncated
+      .flatMap((e) => e.userInputMessage?.userInputMessageContext?.toolResults ?? [])
+      .find((t) => t.toolUseId === callId)?.toolUseId;
+
+    expect(callId).toBeDefined();
+    expect(callId).toBe(resultId);
+    expect(callId).toMatch(KIRO_TOOL_USE_ID_PATTERN);
+    expect(callId).not.toBe("functions.eval:17");
   });
 });

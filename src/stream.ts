@@ -63,6 +63,7 @@ import {
   TOOL_RESULT_LIMIT,
   truncate,
 } from "./transform.js";
+import { createKiroToolUseIdNormalizer, KIRO_TOOL_USE_ID_PATTERN } from "./tool-id.js";
 import { TRUNCATION_NOTICE, wasPreviousResponseTruncated } from "./truncation.js";
 
 const CAPACITY_LOG_DIR = join(homedir(), ".pi", "logs");
@@ -146,6 +147,26 @@ export function applyAdaptivePayloadShape(
       (uim.userInputMessageContext ??= {}).additionalModelRequestFields = payload;
       break;
   }
+}
+
+/**
+ * Validate every tool-use ID in the serialized Kiro request. Throws a local, descriptive error
+ * before the network call if any ID is still invalid after normalization, preventing an opaque
+ * Bedrock 400 (TOOL_SCHEMA_INVALID). Does not mutate the request.
+ */
+export function assertValidKiroToolUseIds(request: KiroRequest): void {
+  const check = (id: string | undefined): void => {
+    if (id === undefined) return;
+    if (!KIRO_TOOL_USE_ID_PATTERN.test(id)) {
+      throw new Error(`Kiro request contains invalid toolUseId after normalization: ${id}`);
+    }
+  };
+  for (const entry of request.conversationState.history ?? []) {
+    for (const tu of entry.assistantResponseMessage?.toolUses ?? []) check(tu.toolUseId);
+    for (const tr of entry.userInputMessage?.userInputMessageContext?.toolResults ?? []) check(tr.toolUseId);
+  }
+  const currentCtx = request.conversationState.currentMessage.userInputMessage.userInputMessageContext;
+  for (const tr of currentCtx?.toolResults ?? []) check(tr.toolUseId);
 }
 interface KiroToolCallState {
   toolUseId: string;
@@ -375,6 +396,11 @@ export function streamKiro(
       const maxRetries = 3;
       const conversationId = options?.sessionId ?? crypto.randomUUID();
       const agentContinuationId = crypto.randomUUID();
+      // One normalizer per request: foreign tool-call IDs (e.g. Kimi's "functions.find:4") are
+      // mapped to Kiro-safe IDs at serialization time only. Created before the retry loop so
+      // retries rebuild the same request with identical, stable mappings.
+      const toolUseIdNormalizer = createKiroToolUseIdNormalizer();
+      let loggedToolIds = false;
       while (retryCount <= maxRetries) {
         if (options?.signal?.aborted) throw options.signal.reason;
         const effectiveSystemPrompt = systemPrompt;
@@ -383,7 +409,7 @@ export function streamKiro(
           history: rawHistory,
           systemPrepended,
           currentMsgStartIdx,
-        } = buildHistory(normalized, kiroModelId, effectiveSystemPrompt);
+        } = buildHistory(normalized, kiroModelId, effectiveSystemPrompt, (id) => toolUseIdNormalizer.normalize(id));
         // Scale history limit to model context window
         // HISTORY_LIMIT (850K chars) is sized for 200K token models
         const dynamicHistoryLimit = Math.floor(((model.contextWindow ?? 0) / HISTORY_LIMIT_CONTEXT_WINDOW) * HISTORY_LIMIT);
@@ -407,7 +433,7 @@ export function streamKiro(
                 const tc = b as ToolCall;
                 armToolUses.push({
                   name: tc.name,
-                  toolUseId: tc.id,
+                  toolUseId: toolUseIdNormalizer.normalize(tc.id),
                   input:
                     typeof tc.arguments === "string"
                       ? JSON.parse(tc.arguments)
@@ -439,7 +465,7 @@ export function streamKiro(
               currentToolResults.push({
                 content: [{ text: truncate(getContentText(m), toolResultLimit) }],
                 status: trm.isError ? "error" : "success",
-                toolUseId: trm.toolCallId,
+                toolUseId: toolUseIdNormalizer.normalize(trm.toolCallId),
               });
               if (Array.isArray(trm.content))
                 for (const c of trm.content) if (c.type === "image") toolResultImages.push(c as ImageContent);
@@ -458,7 +484,7 @@ export function streamKiro(
               currentToolResults.push({
                 content: [{ text: truncate(getContentText(m), toolResultLimit) }],
                 status: trm.isError ? "error" : "success",
-                toolUseId: trm.toolCallId,
+                toolUseId: toolUseIdNormalizer.normalize(trm.toolCallId),
               });
               if (Array.isArray(trm.content))
                 for (const c of trm.content) if (c.type === "image") toolResultImages2.push(c as ImageContent);
@@ -514,6 +540,17 @@ export function streamKiro(
         };
         if (adaptiveThinking && adaptivePayloadShape) {
           applyAdaptivePayloadShape(request, adaptiveThinking, adaptivePayloadShape);
+        }
+        // Fail fast locally if any tool-use ID is still invalid after normalization,
+        // rather than letting Kiro reject it with an opaque 400 TOOL_SCHEMA_INVALID.
+        assertValidKiroToolUseIds(request);
+        // Log the foreign→Kiro ID mappings once per request (mappings are stable across retries).
+        if (!loggedToolIds && debugEnabled()) {
+          const normalizedToolIds = toolUseIdNormalizer.getMappings();
+          if (normalizedToolIds.length > 0) {
+            debugLog("tool_ids.normalized", { count: normalizedToolIds.length, mappings: normalizedToolIds });
+          }
+          loggedToolIds = true;
         }
         let response!: Response;
         // Reset per outer iteration — each 403 retry gets a fresh capacity budget

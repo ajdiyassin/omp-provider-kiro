@@ -115,6 +115,19 @@ This extension targets the current Kiro API (matching Kiro CLI 2.6.x):
 `{region}` is `us-east-1` or `eu-central-1` (auto-detected from your credentials). The legacy
 `q.{region}.amazonaws.com` CodeWhisperer endpoint is no longer used.
 
+## Cross-provider session compatibility
+
+When resuming an OMP session created by another provider, the Kiro provider normalizes foreign
+tool-call IDs to Kiro-compatible IDs while preserving tool-call/tool-result pairing. The stored
+OMP session is not modified.
+
+Kiro requires tool-use IDs to match `^[a-zA-Z0-9_-]+$`. Other providers (e.g. Fireworks/Kimi,
+which emits IDs like `functions.find:4`) use characters Kiro rejects with
+`ValidationException / TOOL_SCHEMA_INVALID`. The provider rewrites such IDs to a deterministic
+`call_<hash>` form only while serializing the outgoing Kiro request — the same normalized value
+is used for both a tool call and its matching result, so pairing is preserved. Valid Kiro IDs pass
+through unchanged. Set `KIRO_DEBUG=1` to log the `tool_ids.normalized` mappings for a request.
+
 ## Windows Kiro CLI DB paths
 
 The extension checks both locations:

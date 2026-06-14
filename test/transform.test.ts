@@ -11,6 +11,7 @@ import {
   TOOL_RESULT_LIMIT,
   truncate,
 } from "../src/transform.js";
+import { createKiroToolUseIdNormalizer, KIRO_TOOL_USE_ID_PATTERN } from "../src/tool-id.js";
 
 const ts = Date.now();
 const usage = {
@@ -267,5 +268,32 @@ describe("getEnvState", () => {
     const expected: Record<string, string> = { darwin: "macos", win32: "windows", linux: "linux" };
     const want = expected[process.platform] ?? "linux";
     expect(getEnvState().operatingSystem).toBe(want);
+  });
+});
+
+
+describe("buildHistory tool-use ID normalization", () => {
+  it("Test 5: a foreign call and its result serialize to the same valid normalized ID", () => {
+    const normalizer = createKiroToolUseIdNormalizer();
+    const msgs: Message[] = [
+      user("go"),
+      assistant("", {
+        content: [{ type: "toolCall", id: "functions.search:6", name: "search", arguments: { query: "test" } } as never],
+      }),
+      toolResult("functions.search:6", "result"),
+      user("continue"),
+    ];
+
+    const { history } = buildHistory(msgs, "M", undefined, normalizer.normalize);
+
+    const assistantEntry = history.find((h) => h.assistantResponseMessage?.toolUses?.length);
+    const resultEntry = history.find((h) => h.userInputMessage?.userInputMessageContext?.toolResults?.length);
+    const callId = assistantEntry?.assistantResponseMessage?.toolUses?.[0].toolUseId;
+    const resultId = resultEntry?.userInputMessage?.userInputMessageContext?.toolResults?.[0].toolUseId;
+
+    expect(callId).toBeDefined();
+    expect(callId).toBe(resultId);
+    expect(callId).toMatch(KIRO_TOOL_USE_ID_PATTERN);
+    expect(callId).not.toBe("functions.search:6");
   });
 });

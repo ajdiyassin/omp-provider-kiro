@@ -10,7 +10,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { capacityRetryConfig, retryConfig } from "../src/retry.js";
-import { resetProfileArnCache, streamKiro } from "../src/stream.js";
+import { assertValidKiroToolUseIds, resetProfileArnCache, streamKiro } from "../src/stream.js";
 import type { KiroHistoryEntry } from "../src/transform.js";
 
 const ts = Date.now();
@@ -2530,5 +2530,166 @@ describe("Feature 9: Streaming Integration", () => {
     expect(badPadding).toHaveLength(0);
 
     vi.unstubAllGlobals();
+  });
+});
+
+
+describe("tool-use ID normalization (cross-provider sessions)", () => {
+  const KIMI_IDS = ["functions.find:4", "functions.search:6", "functions.bash:3", "functions.eval:17"];
+
+  const um = (content: string) => ({ role: "user", content, timestamp: ts }) as any;
+  const tc = (id: string, name: string, args: Record<string, unknown> = {}) =>
+    ({
+      role: "assistant",
+      content: [{ type: "toolCall", id, name, arguments: args }],
+      api: "kiro-api",
+      provider: "kiro",
+      model: "test",
+      usage: zeroUsage,
+      stopReason: "toolUse",
+      timestamp: ts,
+    }) as any;
+  const tr = (id: string, text = "ok") =>
+    ({
+      role: "toolResult",
+      toolCallId: id,
+      toolName: "t",
+      content: [{ type: "text", text }],
+      isError: false,
+      timestamp: ts,
+    }) as any;
+
+  const ctxOf = (messages: any[]) => ({ systemPrompt: "s", tools: [], messages }) as any;
+  const bodyOf = (mockFetch: ReturnType<typeof vi.fn>, call = 0) => JSON.parse(mockFetch.mock.calls[call][1].body);
+  const allToolUseIds = (body: any): string[] => {
+    const ids: string[] = [];
+    for (const e of body.conversationState.history ?? []) {
+      for (const tu of e.assistantResponseMessage?.toolUses ?? []) ids.push(tu.toolUseId);
+      for (const t of e.userInputMessage?.userInputMessageContext?.toolResults ?? []) ids.push(t.toolUseId);
+    }
+    const cur = body.conversationState.currentMessage.userInputMessage.userInputMessageContext;
+    for (const t of cur?.toolResults ?? []) ids.push(t.toolUseId);
+    return ids;
+  };
+
+  it("Test 6: current-turn foreign call and result serialize to the same normalized ID", async () => {
+    const mockFetch = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+    await collect(
+      streamKiro(makeModel(), ctxOf([um("find it"), tc("functions.find:4", "find"), tr("functions.find:4")]), {
+        apiKey: "tok",
+      } as any),
+    );
+    const body = bodyOf(mockFetch);
+    const callId = body.conversationState.history.at(-1).assistantResponseMessage.toolUses[0].toolUseId;
+    const resultId = body.conversationState.currentMessage.userInputMessage.userInputMessageContext.toolResults[0].toolUseId;
+    expect(callId).toBe(resultId);
+    expect(callId).toMatch(/^[a-zA-Z0-9_-]+$/);
+    expect(callId).not.toBe("functions.find:4");
+    vi.unstubAllGlobals();
+  });
+
+  it("Test 7: resumed Kimi session serializes with no raw foreign IDs and intact pairing", async () => {
+    const mockFetch = mockFetchOk('{"content":"answer"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+    const messages = [
+      um("start"),
+      tc(KIMI_IDS[0], "find"),
+      tr(KIMI_IDS[0]),
+      tc(KIMI_IDS[1], "search"),
+      tr(KIMI_IDS[1]),
+      tc(KIMI_IDS[2], "bash"),
+      tr(KIMI_IDS[2]),
+      tc(KIMI_IDS[3], "eval"),
+      tr(KIMI_IDS[3]),
+      um("now answer"),
+    ];
+    await collect(streamKiro(makeModel(), ctxOf(messages), { apiKey: "tok" } as any));
+
+    expect(mockFetch).toHaveBeenCalled();
+    const raw = mockFetch.mock.calls[0][1].body as string;
+    for (const id of KIMI_IDS) expect(raw).not.toContain(id);
+
+    const body = bodyOf(mockFetch);
+    const callIds = new Set<string>();
+    const resultIds = new Set<string>();
+    for (const e of body.conversationState.history) {
+      for (const tu of e.assistantResponseMessage?.toolUses ?? []) callIds.add(tu.toolUseId);
+      for (const t of e.userInputMessage?.userInputMessageContext?.toolResults ?? []) resultIds.add(t.toolUseId);
+    }
+    expect(callIds.size).toBe(4);
+    expect([...callIds].sort()).toEqual([...resultIds].sort()); // every call has a matching result
+    for (const id of allToolUseIds(body)) expect(id).toMatch(/^[a-zA-Z0-9_-]+$/);
+
+    // source messages still carry their original Kimi IDs
+    expect((messages[1] as any).content[0].id).toBe(KIMI_IDS[0]);
+    expect((messages[2] as any).toolCallId).toBe(KIMI_IDS[0]);
+    vi.unstubAllGlobals();
+  });
+
+  it("Test 8: serialization does not mutate the source OMP messages", async () => {
+    const mockFetch = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+    const messages = [um("go"), tc("functions.find:4", "find"), tr("functions.find:4"), um("answer")];
+    const original = structuredClone(messages);
+    await collect(streamKiro(makeModel(), ctxOf(messages), { apiKey: "tok" } as any));
+    expect(messages).toEqual(original);
+    vi.unstubAllGlobals();
+  });
+
+  it("Test 10: tool-ID mappings are identical across a retry", async () => {
+    const okResp = (body: string) => ({
+      ok: true,
+      body: {
+        getReader: () => {
+          let done = false;
+          return {
+            read: () =>
+              done
+                ? Promise.resolve({ done: true, value: undefined })
+                : ((done = true), Promise.resolve({ done: false, value: new TextEncoder().encode(body) })),
+          };
+        },
+      },
+    });
+    // First response is empty (no content / no tool calls) → triggers a retry; second succeeds.
+    const mockFetch = vi
+      .fn()
+      .mockResolvedValueOnce(okResp('{"contextUsagePercentage":5}'))
+      .mockResolvedValueOnce(okResp('{"content":"done"}{"contextUsagePercentage":5}'));
+    vi.stubGlobal("fetch", mockFetch);
+
+    const messages = [um("go"), tc("functions.find:4", "find"), tr("functions.find:4"), um("answer")];
+    await collect(streamKiro(makeModel(), ctxOf(messages), { apiKey: "tok" } as any));
+
+    expect(mockFetch.mock.calls.length).toBeGreaterThanOrEqual(2);
+    const idIn = (body: any) =>
+      body.conversationState.history.find((e: any) => e.assistantResponseMessage?.toolUses?.length)
+        .assistantResponseMessage.toolUses[0].toolUseId;
+    const first = idIn(bodyOf(mockFetch, 0));
+    const second = idIn(bodyOf(mockFetch, 1));
+    expect(first).toBe(second);
+    expect(first).toMatch(/^[a-zA-Z0-9_-]+$/);
+    vi.unstubAllGlobals();
+  });
+
+  describe("assertValidKiroToolUseIds guard", () => {
+    const reqWith = (toolUseId: string): any => ({
+      conversationState: {
+        chatTriggerType: "MANUAL",
+        agentTaskType: "vibe",
+        conversationId: "c",
+        currentMessage: { userInputMessage: { content: "x", modelId: "m", origin: "KIRO_CLI" } },
+        history: [{ assistantResponseMessage: { content: "", toolUses: [{ name: "t", toolUseId, input: {} }] } }],
+      },
+    });
+
+    it("throws on an invalid toolUseId", () => {
+      expect(() => assertValidKiroToolUseIds(reqWith("functions.find:4"))).toThrow(/invalid toolUseId/);
+    });
+
+    it("passes a valid normalized toolUseId", () => {
+      expect(() => assertValidKiroToolUseIds(reqWith("call_abc123"))).not.toThrow();
+    });
   });
 });

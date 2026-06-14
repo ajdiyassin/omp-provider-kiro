@@ -133,6 +133,7 @@ export function buildHistory(
   messages: Message[],
   modelId: string,
   systemPrompt?: string,
+  normalizeToolUseId: (id: string) => string = (id) => id,
 ): { history: KiroHistoryEntry[]; systemPrepended: boolean; currentMsgStartIdx: number } {
   const history: KiroHistoryEntry[] = [];
   let systemPrepended = false;
@@ -184,7 +185,7 @@ export function buildHistory(
             const tc = block as ToolCall;
             armToolUses.push({
               name: tc.name,
-              toolUseId: tc.id,
+              toolUseId: normalizeToolUseId(tc.id),
               input: typeof tc.arguments === "string" ? JSON.parse(tc.arguments) : tc.arguments,
             });
           }
@@ -200,7 +201,7 @@ export function buildHistory(
         {
           content: [{ text: truncate(getContentText(msg), toolResultLimit) }],
           status: trMsg.isError ? "error" : "success",
-          toolUseId: trMsg.toolCallId,
+          toolUseId: normalizeToolUseId(trMsg.toolCallId),
         },
       ];
       const trImages: ImageContent[] = [];
@@ -212,7 +213,7 @@ export function buildHistory(
         toolResults.push({
           content: [{ text: truncate(getContentText(next), toolResultLimit) }],
           status: next.isError ? "error" : "success",
-          toolUseId: next.toolCallId,
+          toolUseId: normalizeToolUseId(next.toolCallId),
         });
         if (Array.isArray(next.content))
           for (const c of next.content) if (c.type === "image") trImages.push(c as ImageContent);
