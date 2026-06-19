@@ -3,6 +3,7 @@ import type {
   AssistantMessage,
   AssistantMessageEvent,
   Context,
+  DeveloperMessage,
   ImageContent,
   Model,
   TextContent,
@@ -2691,5 +2692,99 @@ describe("tool-use ID normalization (cross-provider sessions)", () => {
     it("passes a valid normalized toolUseId", () => {
       expect(() => assertValidKiroToolUseIds(reqWith("call_abc123"))).not.toThrow();
     });
+  });
+});
+
+describe("developer message support (OMP v16)", () => {
+  beforeEach(() => resetProfileArnCache(true));
+  afterEach(() => vi.unstubAllGlobals());
+
+  const bodyOf = (mockFetch: ReturnType<typeof vi.fn>) =>
+    JSON.parse(mockFetch.mock.calls[0][1].body);
+
+  function devCtx(content: string): Context {
+    return {
+      systemPrompt: "You are helpful",
+      messages: [{ role: "developer", content: [{ type: "text", text: content }], timestamp: ts } as DeveloperMessage],
+      tools: [],
+    };
+  }
+
+  it("developer-only current message: content reaches Kiro non-empty", async () => {
+    const mockFetch = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const events = await collect(streamKiro(makeModel(), devCtx("Skill instructions here"), { apiKey: "tok" } as any));
+    expect(events.find((e) => e.type === "done")).toBeDefined();
+
+    const body = bodyOf(mockFetch);
+    const uim = body.conversationState.currentMessage.userInputMessage;
+    expect(uim.content).toContain("Skill instructions here");
+    expect(uim.content.trim().length).toBeGreaterThan(0);
+  });
+
+  it("skill regression: developer current message reaches Kiro instead of empty body", async () => {
+    const skillBody = "# Setup Matt Pocock Skills\n\nConfigure this repo…\n\nStep 1: do X";
+    const mockFetch = mockFetchOk('{"content":"done"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    await collect(streamKiro(makeModel(), devCtx(skillBody), { apiKey: "tok" } as any));
+
+    const raw: string = mockFetch.mock.calls[0][1].body;
+    expect(raw).toContain("Setup Matt Pocock Skills");
+    expect(raw).toContain("Step 1");
+  });
+
+  it("historical developer message is present in Kiro request history", async () => {
+    const mockFetch = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const messages = [
+      { role: "developer", content: [{ type: "text", text: "historic skill" }], timestamp: ts } as DeveloperMessage,
+      { role: "user", content: "follow-up", timestamp: ts } as any,
+    ];
+    await collect(streamKiro(makeModel(), { systemPrompt: "s", messages, tools: [] }, { apiKey: "tok" } as any));
+
+    const body = bodyOf(mockFetch);
+    const historyStr = JSON.stringify(body.conversationState.history ?? []);
+    expect(historyStr).toContain("historic skill");
+  });
+
+  it("adjacent developer + user messages preserve order", async () => {
+    const mockFetch = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const messages = [
+      { role: "developer", content: [{ type: "text", text: "first: developer" }], timestamp: ts } as DeveloperMessage,
+      { role: "user", content: "second: user", timestamp: ts } as any,
+      { role: "user", content: "current turn", timestamp: ts } as any,
+    ];
+    await collect(streamKiro(makeModel(), { systemPrompt: "s", messages, tools: [] }, { apiKey: "tok" } as any));
+
+    const body = bodyOf(mockFetch);
+    const historyEntry = body.conversationState.history?.[0]?.userInputMessage?.content ?? "";
+    expect(historyEntry).toMatch(/first: developer[\s\S]*second: user/);
+  });
+
+  it("images on a developer current message are converted and sent", async () => {
+    const mockFetch = mockFetchOk('{"content":"ok"}{"contextUsagePercentage":5}');
+    vi.stubGlobal("fetch", mockFetch);
+
+    const devMsg: DeveloperMessage = {
+      role: "developer",
+      content: [
+        { type: "text", text: "look at this" },
+        { type: "image", mimeType: "image/png", data: "abc123" } as unknown as ImageContent,
+      ],
+      timestamp: ts,
+    };
+    await collect(
+      streamKiro(makeModel(), { systemPrompt: "s", messages: [devMsg], tools: [] }, { apiKey: "tok" } as any),
+    );
+
+    const body = bodyOf(mockFetch);
+    const uim = body.conversationState.currentMessage.userInputMessage;
+    expect(uim.images).toHaveLength(1);
+    expect(uim.images[0].source.bytes).toBe("abc123");
   });
 });

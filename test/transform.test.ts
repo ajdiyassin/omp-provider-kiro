@@ -1,4 +1,5 @@
 import type { AssistantMessage, Message, Tool, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import type { DeveloperMessage, ImageContent, Tool } from "@oh-my-pi/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
   buildHistory,
@@ -6,6 +7,7 @@ import {
   convertToolsToKiro,
   getContentText,
   getEnvState,
+  kiroToolDescription,
   normalizeMessages,
   sanitizeSurrogates,
   TOOL_RESULT_LIMIT,
@@ -507,5 +509,57 @@ describe("convertToolsToKiro — Kiro-safe tool descriptions (OMP 16.1.x)", () =
     expect(out[3].toolSpecification.description).toBe("Run a command.");
     // ArkType conversion still applied (run tool)
     expect((out[3].toolSpecification.inputSchema.json as Record<string, unknown>).type).toBe("object");
+  });
+});
+
+describe("buildHistory — developer message support (OMP v16)", () => {
+  const modelId = "claude-sonnet-4-5";
+
+  const dev = (text: string): DeveloperMessage => ({
+    role: "developer",
+    content: [{ type: "text", text }],
+    timestamp: Date.now(),
+  });
+  const usr = (text: string) => ({ role: "user" as const, content: text, timestamp: Date.now() });
+
+  it("historical developer message is included in Kiro history and not dropped", () => {
+    // [dev, user(current)]
+    const messages = [dev("Skill instructions here"), usr("User request")];
+    const { history, currentMsgStartIdx } = buildHistory(messages, modelId);
+    expect(currentMsgStartIdx).toBe(1);
+    expect(history).toHaveLength(1);
+    expect(history[0].userInputMessage?.content).toContain("Skill instructions here");
+  });
+
+  it("adjacent developer then user messages preserve order when merged", () => {
+    // [dev, user, user(current)]
+    const messages = [dev("developer instruction"), usr("user request"), usr("current")];
+    const { history } = buildHistory(messages, modelId);
+    // first two become one merged user entry; "developer instruction" must come first
+    expect(history[0].userInputMessage?.content).toMatch(/developer instruction[\s\S]*user request/);
+  });
+
+  it("images on a developer message flow through convertImagesToKiro", () => {
+    const devWithImage: DeveloperMessage = {
+      role: "developer",
+      content: [
+        { type: "text", text: "See image" },
+        { type: "image", mimeType: "image/png", data: "base64data" } as unknown as ImageContent,
+      ],
+      timestamp: Date.now(),
+    };
+    const messages = [devWithImage, usr("current")];
+    const { history } = buildHistory(messages, modelId);
+    expect(history[0].userInputMessage?.images).toHaveLength(1);
+    expect(history[0].userInputMessage?.images?.[0].source.bytes).toBe("base64data");
+  });
+
+  it("skill regression: developer message body reaches Kiro history instead of being dropped", () => {
+    const skillBody =
+      "# Setup Matt Pocock Skills\n\nConfigure this repo for engineering skills…\n\nStep 1: do X\nStep 2: do Y";
+    const messages = [dev(skillBody), usr("proceed")];
+    const { history } = buildHistory(messages, modelId);
+    expect(history[0].userInputMessage?.content).toContain("Setup Matt Pocock Skills");
+    expect(history[0].userInputMessage?.content).toContain("Step 1");
   });
 });

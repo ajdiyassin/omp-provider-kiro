@@ -24,7 +24,14 @@ import { createAssistantMessageEventStream } from "./event-stream.js";
 import { addPlaceholderTools, HISTORY_LIMIT, HISTORY_LIMIT_CONTEXT_WINDOW, truncateHistory } from "./history.js";
 import { getKiroCliCredentials, getKiroCliCredentialsAllowExpired, saveKiroCliCredentials } from "./kiro-cli.js";
 import { forceRefreshKiroToken, type KiroCredentials } from "./oauth.js";
-import { endpointForApiRegion, extractRegionFromEndpoint, extractRegionFromProfileArn, managementEndpointForApiRegion, resolveApiRegion, resolveKiroModel } from "./models.js";
+import {
+  endpointForApiRegion,
+  extractRegionFromEndpoint,
+  extractRegionFromProfileArn,
+  managementEndpointForApiRegion,
+  resolveApiRegion,
+  resolveKiroModel,
+} from "./models.js";
 import {
   ADAPTIVE_PAYLOAD_LOCATIONS,
   type AdaptivePayloadShape,
@@ -304,8 +311,10 @@ export function streamKiro(
       const expiredCliCreds = getKiroCliCredentialsAllowExpired();
 
       const matchingCliCreds =
-        cliCreds?.access === accessToken ? cliCreds
-          : expiredCliCreds?.access === accessToken ? expiredCliCreds
+        cliCreds?.access === accessToken
+          ? cliCreds
+          : expiredCliCreds?.access === accessToken
+            ? expiredCliCreds
             : undefined;
 
       const cachedMeta = readAuthMeta(accessToken);
@@ -326,9 +335,7 @@ export function streamKiro(
       let apiRegion: string;
       let endpoint: string;
       let profileArn: string | undefined =
-        optionCreds?.profileArn ||
-        matchingCliCreds?.profileArn ||
-        cachedMeta?.profileArn;
+        optionCreds?.profileArn || matchingCliCreds?.profileArn || cachedMeta?.profileArn;
 
       if (requestedRegion) {
         apiRegion = resolveApiRegion(requestedRegion);
@@ -391,7 +398,9 @@ export function streamKiro(
       });
       // System prompt is sent plain — adaptive thinking is controlled via
       // additionalModelRequestFields, not legacy extended-thinking XML.
-      const systemPrompt = Array.isArray(context.systemPrompt) ? context.systemPrompt.join("\n") : (context.systemPrompt ?? "");
+      const systemPrompt = Array.isArray(context.systemPrompt)
+        ? context.systemPrompt.join("\n")
+        : (context.systemPrompt ?? "");
       let retryCount = 0;
       const maxRetries = 3;
       const conversationId = options?.sessionId ?? crypto.randomUUID();
@@ -412,7 +421,9 @@ export function streamKiro(
         } = buildHistory(normalized, kiroModelId, effectiveSystemPrompt, (id) => toolUseIdNormalizer.normalize(id));
         // Scale history limit to model context window
         // HISTORY_LIMIT (850K chars) is sized for 200K token models
-        const dynamicHistoryLimit = Math.floor(((model.contextWindow ?? 0) / HISTORY_LIMIT_CONTEXT_WINDOW) * HISTORY_LIMIT);
+        const dynamicHistoryLimit = Math.floor(
+          ((model.contextWindow ?? 0) / HISTORY_LIMIT_CONTEXT_WINDOW) * HISTORY_LIMIT,
+        );
         const history = truncateHistory(rawHistory, dynamicHistoryLimit);
         const toolResultLimit = TOOL_RESULT_LIMIT;
         const currentMessages = normalized.slice(currentMsgStartIdx);
@@ -420,84 +431,102 @@ export function streamKiro(
         let currentContent = "";
         const currentToolResults: KiroToolResult[] = [];
         let currentImages: KiroImage[] | undefined;
-        if (firstMsg?.role === "assistant") {
-          const am = firstMsg as AssistantMessage;
-          let armContent = "";
-          const armToolUses: Array<{ name: string; toolUseId: string; input: Record<string, unknown> }> = [];
-          if (Array.isArray(am.content))
-            for (const b of am.content) {
-              if (b.type === "text") armContent += (b as TextContent).text;
-              else if (b.type === "thinking")
-                armContent = `<thinking>${(b as unknown as { thinking: string }).thinking}</thinking>\n\n${armContent}`;
-              else if (b.type === "toolCall") {
-                const tc = b as ToolCall;
-                armToolUses.push({
-                  name: tc.name,
-                  toolUseId: toolUseIdNormalizer.normalize(tc.id),
-                  input:
-                    typeof tc.arguments === "string"
-                      ? JSON.parse(tc.arguments)
-                      : (tc.arguments as Record<string, unknown>),
+        switch (firstMsg?.role) {
+          case "assistant": {
+            const am = firstMsg as AssistantMessage;
+            let armContent = "";
+            const armToolUses: Array<{ name: string; toolUseId: string; input: Record<string, unknown> }> = [];
+            if (Array.isArray(am.content))
+              for (const b of am.content) {
+                if (b.type === "text") armContent += (b as TextContent).text;
+                else if (b.type === "thinking")
+                  armContent = `<thinking>${(b as unknown as { thinking: string }).thinking}</thinking>\n\n${armContent}`;
+                else if (b.type === "toolCall") {
+                  const tc = b as ToolCall;
+                  armToolUses.push({
+                    name: tc.name,
+                    toolUseId: toolUseIdNormalizer.normalize(tc.id),
+                    input:
+                      typeof tc.arguments === "string"
+                        ? JSON.parse(tc.arguments)
+                        : (tc.arguments as Record<string, unknown>),
+                  });
+                }
+                // redactedThinking: intentionally skipped — opaque provider-specific
+                // reasoning data with no Kiro text representation.
+              }
+            if (armContent || armToolUses.length > 0) {
+              const lastEntryForArm = history[history.length - 1];
+              const prevArm = lastEntryForArm?.assistantResponseMessage;
+              if (history.length > 0 && !lastEntryForArm?.userInputMessage && prevArm) {
+                prevArm.content += `\n\n${armContent}`;
+                if (armToolUses.length > 0) prevArm.toolUses = [...(prevArm.toolUses || []), ...armToolUses];
+              } else {
+                history.push({
+                  assistantResponseMessage: {
+                    content: armContent,
+                    ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
+                  },
                 });
               }
             }
-          if (armContent || armToolUses.length > 0) {
-            const lastEntryForArm = history[history.length - 1];
-            const prevArm = lastEntryForArm?.assistantResponseMessage;
-            if (history.length > 0 && !lastEntryForArm?.userInputMessage && prevArm) {
-              // Merge into previous assistant message to maintain alternation without synthetic padding
-              prevArm.content += `\n\n${armContent}`;
-              if (armToolUses.length > 0) prevArm.toolUses = [...(prevArm.toolUses || []), ...armToolUses];
-            } else {
-              history.push({
-                assistantResponseMessage: {
-                  content: armContent,
-                  ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
-                },
-              });
+            const toolResultImages: ImageContent[] = [];
+            for (let i = 1; i < currentMessages.length; i++) {
+              const m = currentMessages[i];
+              if (m.role === "toolResult") {
+                const trm = m as ToolResultMessage;
+                currentToolResults.push({
+                  content: [{ text: truncate(getContentText(m), toolResultLimit) }],
+                  status: trm.isError ? "error" : "success",
+                  toolUseId: toolUseIdNormalizer.normalize(trm.toolCallId),
+                });
+                if (Array.isArray(trm.content))
+                  for (const c of trm.content) if (c.type === "image") toolResultImages.push(c as ImageContent);
+              }
             }
-          }
-          const toolResultImages: ImageContent[] = [];
-          for (let i = 1; i < currentMessages.length; i++) {
-            const m = currentMessages[i];
-            if (m.role === "toolResult") {
-              const trm = m as ToolResultMessage;
-              currentToolResults.push({
-                content: [{ text: truncate(getContentText(m), toolResultLimit) }],
-                status: trm.isError ? "error" : "success",
-                toolUseId: toolUseIdNormalizer.normalize(trm.toolCallId),
-              });
-              if (Array.isArray(trm.content))
-                for (const c of trm.content) if (c.type === "image") toolResultImages.push(c as ImageContent);
+            if (toolResultImages.length > 0) {
+              const converted = convertImagesToKiro(toolResultImages);
+              currentImages = currentImages ? [...currentImages, ...converted] : converted;
             }
+            currentContent = currentToolResults.length > 0 ? "Tool results provided." : "Please proceed with the task.";
+            break;
           }
-          if (toolResultImages.length > 0) {
-            const converted = convertImagesToKiro(toolResultImages);
-            currentImages = currentImages ? [...currentImages, ...converted] : converted;
-          }
-          currentContent = currentToolResults.length > 0 ? "Tool results provided." : "Please proceed with the task.";
-        } else if (firstMsg?.role === "toolResult") {
-          const toolResultImages2: ImageContent[] = [];
-          for (const m of currentMessages)
-            if (m.role === "toolResult") {
-              const trm = m as ToolResultMessage;
-              currentToolResults.push({
-                content: [{ text: truncate(getContentText(m), toolResultLimit) }],
-                status: trm.isError ? "error" : "success",
-                toolUseId: toolUseIdNormalizer.normalize(trm.toolCallId),
-              });
-              if (Array.isArray(trm.content))
-                for (const c of trm.content) if (c.type === "image") toolResultImages2.push(c as ImageContent);
+          case "toolResult": {
+            const toolResultImages2: ImageContent[] = [];
+            for (const m of currentMessages)
+              if (m.role === "toolResult") {
+                const trm = m as ToolResultMessage;
+                currentToolResults.push({
+                  content: [{ text: truncate(getContentText(m), toolResultLimit) }],
+                  status: trm.isError ? "error" : "success",
+                  toolUseId: toolUseIdNormalizer.normalize(trm.toolCallId),
+                });
+                if (Array.isArray(trm.content))
+                  for (const c of trm.content) if (c.type === "image") toolResultImages2.push(c as ImageContent);
+              }
+            if (toolResultImages2.length > 0) {
+              const converted = convertImagesToKiro(toolResultImages2);
+              currentImages = currentImages ? [...currentImages, ...converted] : converted;
             }
-          if (toolResultImages2.length > 0) {
-            const converted = convertImagesToKiro(toolResultImages2);
-            currentImages = currentImages ? [...currentImages, ...converted] : converted;
+            currentContent = "Tool results provided.";
+            break;
           }
-          currentContent = "Tool results provided.";
-        } else if (firstMsg?.role === "user") {
-          currentContent = typeof firstMsg.content === "string" ? firstMsg.content : getContentText(firstMsg);
-          if (effectiveSystemPrompt && !systemPrepended)
-            currentContent = `${effectiveSystemPrompt}\n\n${currentContent}`;
+          // Kiro has no developer role; developer content (skills, hooks, file-mention
+          // context) is serialized as user-side input — same path as "user".
+          case "user":
+          case "developer": {
+            currentContent = typeof firstMsg.content === "string" ? firstMsg.content : getContentText(firstMsg);
+            if (effectiveSystemPrompt && !systemPrepended)
+              currentContent = `${effectiveSystemPrompt}\n\n${currentContent}`;
+            const imgs = extractImages(firstMsg);
+            if (imgs.length > 0) currentImages = convertImagesToKiro(imgs as ImageContent[]);
+            break;
+          }
+          case undefined:
+            break;
+          default:
+            // Exhaustiveness guard: a new OMP message role must be handled explicitly.
+            firstMsg satisfies never;
         }
         // Prepend truncation notice if the previous assistant response was cut off
         if (wasPreviousResponseTruncated(context.messages)) {
@@ -512,10 +541,6 @@ export function streamKiro(
             if (history.length > 0) kt = addPlaceholderTools(kt, history);
             uimc.tools = kt;
           }
-        }
-        if (firstMsg?.role === "user") {
-          const imgs = extractImages(firstMsg);
-          if (imgs.length > 0) currentImages = convertImagesToKiro(imgs as ImageContent[]);
         }
         // kiro-cli does not enforce alternation — the API accepts
         // non-alternating history. No synthetic padding needed.

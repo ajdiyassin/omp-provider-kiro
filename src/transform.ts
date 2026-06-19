@@ -162,98 +162,114 @@ export function buildHistory(
 
   for (let i = 0; i < historyMessages.length; i++) {
     const msg = historyMessages[i];
-    if (msg.role === "user") {
-      let content = typeof msg.content === "string" ? msg.content : getContentText(msg);
-      if (systemPrompt && !systemPrepended) {
-        content = `${systemPrompt}\n\n${content}`;
-        systemPrepended = true;
+    switch (msg.role) {
+      // Kiro has no separate developer role; developer content (skills, hooks,
+      // extension/file-mention context) is serialized as user-side input.
+      case "user":
+      case "developer": {
+        let content = typeof msg.content === "string" ? msg.content : getContentText(msg);
+        if (systemPrompt && !systemPrepended) {
+          content = `${systemPrompt}\n\n${content}`;
+          systemPrepended = true;
+        }
+        const images = extractImages(msg);
+        const uim: KiroUserInputMessage = {
+          content: sanitizeSurrogates(content),
+          modelId,
+          origin: "KIRO_CLI",
+          ...(images.length > 0 ? { images: convertImagesToKiro(images) } : {}),
+          userInputMessageContext: { envState: getEnvState() },
+        };
+        const prevUim = history[history.length - 1]?.userInputMessage;
+        if (prevUim) {
+          // Merge adjacent user-side (user/developer) messages; original order preserved.
+          prevUim.content += `\n\n${uim.content}`;
+          if (uim.images) prevUim.images = [...(prevUim.images || []), ...uim.images];
+        } else {
+          history.push({ userInputMessage: uim });
+        }
+        break;
       }
-      const images = extractImages(msg);
-      const uim: KiroUserInputMessage = {
-        content: sanitizeSurrogates(content),
-        modelId,
-        origin: "KIRO_CLI",
-        ...(images.length > 0 ? { images: convertImagesToKiro(images) } : {}),
-        userInputMessageContext: { envState: getEnvState() },
-      };
-      const lastEntryForUim = history[history.length - 1];
-      const prevUim = lastEntryForUim?.userInputMessage;
-      if (prevUim) {
-        // Merge into previous user message to maintain alternation without synthetic padding
-        prevUim.content += `\n\n${uim.content}`;
-        if (uim.images) prevUim.images = [...(prevUim.images || []), ...uim.images];
-      } else {
-        history.push({ userInputMessage: uim });
-      }
-    } else if (msg.role === "assistant") {
-      let armContent = "";
-      const armToolUses: KiroToolUse[] = [];
-      if (Array.isArray(msg.content)) {
-        for (const block of msg.content) {
-          if (block.type === "text") armContent += (block as TextContent).text;
-          else if (block.type === "thinking")
-            armContent = `<thinking>${(block as ThinkingContent).thinking}</thinking>\n\n${armContent}`;
-          else if (block.type === "toolCall") {
-            const tc = block as ToolCall;
-            armToolUses.push({
-              name: tc.name,
-              toolUseId: normalizeToolUseId(tc.id),
-              input: typeof tc.arguments === "string" ? JSON.parse(tc.arguments) : tc.arguments,
-            });
+      case "assistant": {
+        let armContent = "";
+        const armToolUses: KiroToolUse[] = [];
+        if (Array.isArray(msg.content)) {
+          for (const block of msg.content) {
+            if (block.type === "text") armContent += (block as TextContent).text;
+            else if (block.type === "thinking")
+              armContent = `<thinking>${(block as ThinkingContent).thinking}</thinking>\n\n${armContent}`;
+            else if (block.type === "toolCall") {
+              const tc = block as ToolCall;
+              armToolUses.push({
+                name: tc.name,
+                toolUseId: normalizeToolUseId(tc.id),
+                input: typeof tc.arguments === "string" ? JSON.parse(tc.arguments) : tc.arguments,
+              });
+            }
+            // redactedThinking: intentionally skipped — opaque provider-specific
+            // reasoning data with no Kiro text representation.
           }
         }
+        if (armContent || armToolUses.length > 0) {
+          history.push({
+            assistantResponseMessage: {
+              content: armContent,
+              ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}),
+            },
+          });
+        }
+        break;
       }
-      if (!armContent && armToolUses.length === 0) continue;
-      history.push({
-        assistantResponseMessage: { content: armContent, ...(armToolUses.length > 0 ? { toolUses: armToolUses } : {}) },
-      });
-    } else if (msg.role === "toolResult") {
-      const trMsg = msg as ToolResultMessage;
-      const toolResults: KiroToolResult[] = [
-        {
-          content: [{ text: truncate(getContentText(msg), toolResultLimit) }],
-          status: trMsg.isError ? "error" : "success",
-          toolUseId: normalizeToolUseId(trMsg.toolCallId),
-        },
-      ];
-      const trImages: ImageContent[] = [];
-      if (Array.isArray(trMsg.content))
-        for (const c of trMsg.content) if (c.type === "image") trImages.push(c as ImageContent);
-      let j = i + 1;
-      while (j < historyMessages.length && historyMessages[j].role === "toolResult") {
-        const next = historyMessages[j] as ToolResultMessage;
-        toolResults.push({
-          content: [{ text: truncate(getContentText(next), toolResultLimit) }],
-          status: next.isError ? "error" : "success",
-          toolUseId: normalizeToolUseId(next.toolCallId),
-        });
-        if (Array.isArray(next.content))
-          for (const c of next.content) if (c.type === "image") trImages.push(c as ImageContent);
-        j++;
-      }
-      i = j - 1;
-      const lastEntryForTr = history[history.length - 1];
-      const prevTr = lastEntryForTr?.userInputMessage;
-      if (prevTr) {
-        // Merge tool results into previous user message to maintain alternation without synthetic padding
-        prevTr.content += "\n\nTool results provided.";
-        if (trImages.length > 0) prevTr.images = [...(prevTr.images || []), ...convertImagesToKiro(trImages)];
-        if (!prevTr.userInputMessageContext) prevTr.userInputMessageContext = {};
-        prevTr.userInputMessageContext.toolResults = [
-          ...(prevTr.userInputMessageContext.toolResults || []),
-          ...toolResults,
-        ];
-      } else {
-        history.push({
-          userInputMessage: {
-            content: "Tool results provided.",
-            modelId,
-            origin: "KIRO_CLI",
-            ...(trImages.length > 0 ? { images: convertImagesToKiro(trImages) } : {}),
-            userInputMessageContext: { toolResults, envState: getEnvState() },
+      case "toolResult": {
+        const trMsg = msg as ToolResultMessage;
+        const toolResults: KiroToolResult[] = [
+          {
+            content: [{ text: truncate(getContentText(msg), toolResultLimit) }],
+            status: trMsg.isError ? "error" : "success",
+            toolUseId: normalizeToolUseId(trMsg.toolCallId),
           },
-        });
+        ];
+        const trImages: ImageContent[] = [];
+        if (Array.isArray(trMsg.content))
+          for (const c of trMsg.content) if (c.type === "image") trImages.push(c as ImageContent);
+        let j = i + 1;
+        while (j < historyMessages.length && historyMessages[j].role === "toolResult") {
+          const next = historyMessages[j] as ToolResultMessage;
+          toolResults.push({
+            content: [{ text: truncate(getContentText(next), toolResultLimit) }],
+            status: next.isError ? "error" : "success",
+            toolUseId: normalizeToolUseId(next.toolCallId),
+          });
+          if (Array.isArray(next.content))
+            for (const c of next.content) if (c.type === "image") trImages.push(c as ImageContent);
+          j++;
+        }
+        i = j - 1;
+        const prevTr = history[history.length - 1]?.userInputMessage;
+        if (prevTr) {
+          prevTr.content += "\n\nTool results provided.";
+          if (trImages.length > 0) prevTr.images = [...(prevTr.images || []), ...convertImagesToKiro(trImages)];
+          if (!prevTr.userInputMessageContext) prevTr.userInputMessageContext = {};
+          prevTr.userInputMessageContext.toolResults = [
+            ...(prevTr.userInputMessageContext.toolResults || []),
+            ...toolResults,
+          ];
+        } else {
+          history.push({
+            userInputMessage: {
+              content: "Tool results provided.",
+              modelId,
+              origin: "KIRO_CLI",
+              ...(trImages.length > 0 ? { images: convertImagesToKiro(trImages) } : {}),
+              userInputMessageContext: { toolResults, envState: getEnvState() },
+            },
+          });
+        }
+        break;
       }
+      default:
+        // Exhaustiveness guard: a new OMP message role must be handled explicitly.
+        msg satisfies never;
     }
   }
   return { history, systemPrepended, currentMsgStartIdx };
